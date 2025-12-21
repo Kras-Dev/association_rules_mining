@@ -1,9 +1,10 @@
 import logging
 import os
 import pickle
+from tqdm import tqdm
 import pandas as pd
 from typing import Dict, Optional, Tuple
-from association_miner.features_engineer import Features  # импорт внутри метода
+from association_miner.features_engineer import Features
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +28,11 @@ class CandleMiner:
         binary_cols = features.select_dtypes(include=['int64']).columns.tolist()
         logger.info(f"[CandleMiner]: ✅ {len(binary_cols)} бинарных {stage}!")
 
-    def save_rules(self, results: Dict, symbol: str, tf: str):
-        """💾 Сохраняет ТОП-100 правил"""
-        cache_file = f"rules_{symbol}_{tf}.pkl"
-        top_rules = results['all_rules'].head(100)
+    def save_rules(self, results: Dict, symbol: str, tf: str, top_rules: int=100) -> str:
+        """💾 Сохраняет ТОП-100 правил в rules_models/"""
+        os.makedirs("models", exist_ok=True)
+        cache_file = f"models/rules_{symbol}_{tf}.pkl"
+        top_rules = results['all_rules'].head(top_rules)
 
         cache = {
             'top_rules': top_rules,
@@ -38,20 +40,23 @@ class CandleMiner:
             'base_prob_down': results['base_prob_down'],
             'symbol': symbol,
             'tf': tf,
-            'timestamp': pd.Timestamp.now()
+            'timestamp': pd.Timestamp.now(),
+            'total_features': len(results['all_features'].columns)
         }
         with open(cache_file, 'wb') as f:
             pickle.dump(cache, f)
-        print(f"[CandleMiner]: 💾 Правила сохранены: {cache_file} ({len(top_rules)} правил)")
+        print(f"[CandleMiner]: 💾 Сохранено: {cache_file} ({len(top_rules)} правил)")
+        return cache_file
 
     def load_rules(self, symbol: str, tf: str) -> Optional[Dict]:
-        """📂 Загружает готовые правила"""
-        cache_file = f"rules_{symbol}_{tf}.pkl"
+        """📂 Загружает правила из rules_models/"""
+        cache_file = f"models/rules_{symbol}_{tf}.pkl"
         if os.path.exists(cache_file):
             with open(cache_file, 'rb') as f:
                 cache = pickle.load(f)
-            print(f"[CandleMiner]: 📂 Загружено из кэша: {cache_file}")
+            print(f"[CandleMiner]: 📂 Загружено: {cache_file} ({len(cache['top_rules'])} правил)")
             return cache
+        print(f"[CandleMiner]: ❌ Кэш не найден: {cache_file}")
         return None
 
     def _log_rules(self, buy_rules: pd.DataFrame, sell_rules: pd.DataFrame) -> None:
@@ -61,9 +66,9 @@ class CandleMiner:
 
         logger.info(f"[CandleMiner]: НАЙДЕНО: {len(buy_rules)} BUY, {len(sell_rules)} SELL правил")
         logger.info(
-            f"[CandleMiner]: ТОП BUY: {buy_rules.head(1)['confidence'].iloc[0]:.1%} ({buy_rules.head(1)['feature'].iloc[0]})")
+            f"[CandleMiner]: ТОП BUY: {buy_rules.head(1)['confidence'].iloc[0]:.1%} ({buy_rules.head(1)['rule_name'].iloc[0]})")
         logger.info(
-            f"[CandleMiner]: ТОП SELL: {sell_rules.head(1)['confidence'].iloc[0]:.1%} ({sell_rules.head(1)['feature'].iloc[0]})")
+            f"[CandleMiner]: ТОП SELL: {sell_rules.head(1)['confidence'].iloc[0]:.1%} ({sell_rules.head(1)['rule_name'].iloc[0]})")
 
 
     def find_strong_rules(self, features: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -78,14 +83,16 @@ class CandleMiner:
         """
         buy_conditions, sell_conditions = [], []
 
-        # Все бинарные фичи (исключая target)
+        # TQDМ по ВСЕМ ФИЧАМ
         binary_features = [col for col in features.select_dtypes(include=['int64']).columns
                            if col not in ['next_up', 'next_down']]
 
         if self.verbose:
             logger.info(f"[CandleMiner]: Тестируем {len(binary_features)} признаков...")
 
-        for feature in binary_features:
+        # 🔥 ПРОГРЕСС-БАР ПО ФИЧАМ
+        print(f"🔍 Анализ {len(binary_features)} фич...")
+        for feature in tqdm(binary_features, desc="Rules", unit="feature"):
             total = features[features[feature] == 1].shape[0]
             if total < self.min_support:
                 continue
@@ -102,19 +109,21 @@ class CandleMiner:
 
             if buy_conf > self.min_confidence:
                 buy_conditions.append({
-                    'feature': feature, 'confidence': buy_conf, 'support': total,
+                    'rule_name': feature, 'confidence': buy_conf, 'support': total,
                     'lift': buy_lift, 'direction': 'UP'
                 })
 
             if sell_conf > self.min_confidence:
                 sell_conditions.append({
-                    'feature': feature, 'confidence': sell_conf, 'support': total,
+                    'rule_name': feature, 'confidence': sell_conf, 'support': total,
                     'lift': sell_lift, 'direction': 'DOWN'
                 })
 
         buy_rules = pd.DataFrame(buy_conditions).sort_values('lift', ascending=False).reset_index(drop=True)
         sell_rules = pd.DataFrame(sell_conditions).sort_values('lift', ascending=False).reset_index(drop=True)
-        all_rules = pd.concat([buy_rules, sell_rules]).sort_values('lift', ascending=False)
+        all_rules = pd.concat([buy_rules, sell_rules], ignore_index=True) \
+            .sort_values('lift', ascending=False) \
+            .reset_index(drop=True)
 
         self._log_rules(buy_rules, sell_rules)
         return buy_rules, sell_rules, all_rules
@@ -142,28 +151,28 @@ class CandleMiner:
         for i, (_, rule) in enumerate(top.iterrows(), 1):
             emoji = "🟢" if rule['direction'] == 'UP' else "🔴"
             print(
-                f"{i:2d}. {emoji} {rule['feature']:<40}",
+                f"{i:2d}. {emoji} {rule['rule_name']:<40}",
                 f"{rule['confidence']:.1%} когда этот паттерн сработал,",
                 f"сила сигнала(lift)={rule['lift']:.2f} ({int(rule['support'])} случая)"
             )
 
         print("=" * 80)
 
-    def analyze(self, df: pd.DataFrame, symbol: Optional[str] = None, tf_name: Optional[str] = None) -> Dict:
+    def analyze(self, df: pd.DataFrame, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Dict:
         """
         Полный анализ: Features → Rules → Результаты.
 
         Args:
             df: DataFrame с OHLCV
             symbol: название инструмента (для логов)
-            tf_name: таймфрейм (для логов)
+            timeframe: таймфрейм (для логов)
 
         Returns:
             Dict с результатами анализа
         """
-        print(f"[CandleMiner]: Анализ {symbol} {tf_name} ({len(df)} свечей)...")
-        if symbol and tf_name:
-            logger.info(f"[CandleMiner]: Анализ {symbol} {tf_name}...")
+        print(f"[CandleMiner]: Анализ {symbol} {timeframe} ({len(df)} свечей)...")
+        if symbol and timeframe:
+            logger.info(f"[CandleMiner]: Анализ {symbol} {timeframe}...")
 
         # Генерация всех фич
         feat_gen = Features(verbose=self.verbose)
@@ -187,8 +196,27 @@ class CandleMiner:
             'base_prob_up': base_prob_up,
             'base_prob_down': base_prob_down,
             'symbol': symbol,
-            'tf_name': tf_name
+            'tf_name': timeframe
         }
+
+    def smart_analyze(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Dict:
+        """УМНЫЙ анализ: кэш ИЛИ полный пересчёт"""
+        cached = self.load_rules(symbol, timeframe)
+        if cached:
+            print(f"[CandleMiner]: КЭШ АКТУАЛЕН ({len(df)} свечей)")
+            return {
+                'all_rules': cached['top_rules'],
+                'base_prob_up': cached['base_prob_up'],
+                'base_prob_down': cached['base_prob_down'],
+                'symbol': symbol,
+                'tf': timeframe,
+                'from_cache': True
+            }
+
+        print(f"[CandleMiner]: 🔥 ПОЛНЫЙ АНАЛИЗ ({len(df)} свечей)")
+        results = self.analyze(df, symbol, timeframe)
+        self.save_rules(results, symbol, timeframe)
+        return results
 
 
 # ПРИМЕР ИСПОЛЬЗОВАНИЯ

@@ -129,7 +129,7 @@ class Features:
 
     def add_equal_extremes(self, features: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
         """
-        🔥 Равные экстремумы: H(n-1)≈H(n), L(n-1)≈L(n) — уровни поддержки/сопротивления
+        Равные экстремумы: H(n-1)≈H(n), L(n-1)≈L(n) — уровни поддержки/сопротивления
         """
         extremes_features = pd.DataFrame(index=df.index)
         h, l = df['high'], df['low']
@@ -174,8 +174,7 @@ class Features:
                 features['lower_shadow_long'] &
                 features['bullish']
         ).astype(int)  # Отбой от поддержки!
-        print(f"equal_high: {(extremes_features['equal_high'] == 1).sum()} случаев")
-        print(f"equal_low: {(extremes_features['equal_low'] == 1).sum()} случаев")
+
         return extremes_features
 
     def add_sequences(self, features: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
@@ -232,15 +231,41 @@ class Features:
         for col in equal_extremes.columns:
             sequence_columns.append(equal_extremes[col])
 
-        # 🔥 ОДИН pd.concat
+        # ОДИН pd.concat
         new_seq_df = pd.concat(sequence_columns, axis=1)
 
-        # ✅ Объединяем БЕЗ дублей
+        # Объединяем БЕЗ дублей
         result = pd.concat([seq_features, new_seq_df], axis=1)
         result = result.loc[:, ~result.columns.duplicated()]  # убираем дубли
 
         self._log_features(result, "ПОСЛЕДОВАТЕЛЬНОСТЕЙ + EQUAL_EXTREMES")
         return result
+
+    def add_trend_ma(self, df: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
+        """🚀 Трендовые MA: 21/50/200 для H1/H4/D1"""
+        ma21 = df['close'].rolling(21).mean()
+        ma50 = df['close'].rolling(50).mean()
+        ma200 = df['close'].rolling(200).mean()
+
+        # 🟢 СТАРЫЕ (относительные)
+        features['ma_bull_21_50'] = (ma21 > ma50).astype(int)
+        features['ma_bear_21_50'] = (ma21 < ma50).astype(int)
+        features['ma_bull_all'] = ((ma21 > ma50) & (ma50 > ma200)).astype(int)
+        features['ma_bear_all'] = ((ma21 < ma50) & (ma50 < ma200)).astype(int)
+
+        # АБСОЛЮТНЫЕ ПОЗИЦИИ ЦЕНЫ!
+        features['price_above_all_ma'] = ((df['close'] > ma21) & (df['close'] > ma50) & (df['close'] > ma200)).astype(
+            int)  # 🟢 ВЫШЕ ВСЕХ!
+        features['price_below_all_ma'] = ((df['close'] < ma21) & (df['close'] < ma50) & (df['close'] < ma200)).astype(
+            int)  # 🔴 НИЖЕ ВСЕХ!
+
+        # КОНТЕКСТ ДЛЯ ПАТТЕРНОВ
+        features['bearish_below_all_ma'] = (features['bearish'] & features['price_below_all_ma']).astype(
+            int)  # 📉 Продолжение DOWN!
+        features['bullish_above_all_ma'] = (features['bullish'] & features['price_above_all_ma']).astype(
+            int)  # 📈 Продолжение UP!
+
+        return features
 
     def create_target(self, df: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
         """
@@ -269,21 +294,20 @@ class Features:
 
         print("[Features]: Генерация фич...")
 
-        print("[Features]: 1/4 Базовые свечи...", end=" ")
+        print("[Features]: 1/5 Базовые свечи...", end=" ")
         base = self.create_candle_features(df)
-        print(f"[Features]: ✅ {len(base.select_dtypes('int64').columns)} фич")
 
-        print("[Features]: 2/4 Volume комбо...", end=" ")
+        print("[Features]: 2/5 Volume комбо...", end=" ")
         vol_combos = self.add_volume_combos(base, df)
-        print(f"[Features]: ✅ +{len(vol_combos.columns) - len(base.columns)} фич")
 
-        print("[Features]: 3/4 Последовательности...", end=" ")
-        sequences = self.add_sequences(vol_combos, df)
-        print(f"[Features]: ✅ +{len(sequences.columns) - len(vol_combos.columns)} фич")
+        print("[Features]: 3/5 Трендовые MA...", end=" ")
+        trend_features = self.add_trend_ma(df, vol_combos)
 
-        print("[Features]: 4/4 Target...", end=" ")
+        print("[Features]: 4/5 Последовательности...", end=" ")
+        sequences = self.add_sequences(trend_features, df)  # ← trend_features вместо vol_combos!
+
+        print("[Features]: 5/5 Target...", end=" ")
         final = self.create_target(df, sequences)
-        print("[Features]: ✅ ГОТОВО!")
 
         print(f"[Features]: ИТОГО: {len(final.select_dtypes('int64').columns)} бинарных фич")
         return final
