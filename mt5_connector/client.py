@@ -64,7 +64,7 @@ class MT5Client:
         #print(f"[MT5Client]: ✅ {len(df)} баров {symbol} период {self._mt5_var_name(timeframe)}")
         return df.dropna(subset=['time', 'close']).sort_values('time').reset_index(drop=True)
 
-    def _mt5_var_name(self, tf_value):
+    def mt5_var_name(self, tf_value) -> str:
         """mt5.TIMEFRAME_D1 → 'TIMEFRAME_D1'"""
         mt5_vars = {v: k for k, v in vars(mt5).items() if k.startswith('TIMEFRAME_')}
         return mt5_vars.get(tf_value)
