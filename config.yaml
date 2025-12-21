@@ -1,0 +1,14 @@
+# config.yaml
+# Конфигурационные данные для подключения к MetaTrader 5
+
+login: 2000112961
+password: "S2v54cVbZ#"
+server: "AlfaForexRU-Real"
+
+atr_mult: 0.5
+
+n_trials: 100
+n_ensemble: 4
+n_jobs: 3
+
+n_hmm_states: 3
