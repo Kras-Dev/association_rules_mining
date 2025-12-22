@@ -5,7 +5,7 @@ from association_miner.features_engineer import Features
 from mt5_connector.client import MT5Client
 import MetaTrader5 as mt5
 from back_test.backtester import Backtester
-from back_test.config import TEST_SYMBOLS
+from back_test.config import TEST_SYMBOLS, TEST_TIMEFRAMES, get_candles
 
 SYMBOL = "#GMKN"
 TIMEFRAME = mt5.TIMEFRAME_H4
@@ -36,43 +36,40 @@ def main():
 
 def b_test():
     with MT5Client() as client:
-        for symbol, tf in TEST_SYMBOLS.items():
-            print(f"\n{'=' * 80}")
-            print(f"🔥 {symbol} {tf}")
-            print('=' * 80)
+        for symbol in TEST_SYMBOLS:  # 6 символов
+            for tf in TEST_TIMEFRAMES:  # 4 TF
+                print(f"\n{'=' * 80}")
+                print(f"🔥 {symbol} {tf}")
+                print('=' * 80)
 
-            df_full = client.get_rates(symbol, getattr(mt5, f"TIMEFRAME_{tf}"), 35000, 1)
-            print(f"📈 Всего: {len(df_full)} свечей")
+                # 1. Загружаем данные
+                tf_mt5 = getattr(mt5, f"TIMEFRAME_{tf}")
+                df_full = client.get_rates(symbol, tf_mt5, get_candles(tf), 1)
+                if len(df_full) < 1000:
+                    print(f"❌ Мало данных: {len(df_full)}")
+                    continue
 
-            # ✅ ДИНАМИЧЕСКОЕ РАЗДЕЛЕНИЕ
-            total = len(df_full)
-            train_end = int(total * 0.7)
-            test_end = int(total * 0.9)
+                # 2. Разделение
+                total = len(df_full)
+                train_end = int(total * 0.7)
+                test_end = int(total * 0.9)
 
-            train_df = df_full[300:train_end]
-            test_df = df_full[train_end:test_end]
-            live_df = df_full[test_end:]
+                train_df = df_full[300:train_end]  # TRAIN
+                test_df = df_full[train_end:test_end]  # TEST
+                live_df = df_full[test_end:]  # LIVE
 
-            print(f"📊 train: {len(train_df)} | test: {len(test_df)} | live: {len(live_df)}")
+                print(f"📊 train:{len(train_df)} | test:{len(test_df)} | live:{len(live_df)}")
 
-            # ФАЗА 1: НОВЫЕ правила на TRAIN
-            miner = CandleMiner(min_confidence=0.65, min_support=10)
-            train_results = miner.smart_analyze(train_df, symbol, tf)  # ✅ Ты прав!
-            miner.print_top_rules(train_results, 10)
+                # 3. Майним правила на TRAIN
+                miner = CandleMiner(min_confidence=0.7, min_support=10)
+                train_results = miner.smart_analyze(train_df, symbol, tf)
+                miner.print_top_rules(train_results, 10, symbol, tf)
 
-            # ФАЗА 2: DEBUG get_active_rules()
-            feat_gen = Features(verbose=False)
+                # 4. БЭКТЕСТ на TEST
+                for mode in ["SIGNAL_TO_SIGNAL"]:  # Добавь другие позже
+                    bt = Backtester(symbol)  # ✅ Новый Backtester!
+                    metrics = bt.run_backtest(test_df, symbol, tf, mode)
 
-
-            bt = Backtester()
-            bt.rules = train_results['all_rules'][train_results['all_rules']['confidence'] > 0.70]
-
-
-
-            # ФАЗА 3: Бэктест ТОЛЬКО если есть данные
-            if len(test_df) > 1000:
-                for mode in ["SIGNAL_TO_SIGNAL", "ONE_CANDLE", "ATR_TP"]:
-                    bt.run_backtest(test_df, symbol, tf, mode)
 
 if __name__ == "__main__":
     #main()

@@ -10,6 +10,7 @@ SL_ATR_MULTIPLIER = 2.0
 SL_CAP_PCT = 0.015  # 1.5%
 TP_ATR_MULTIPLIER = 2.0
 
+
 # 📊 Режимы выхода
 EXIT_MODES = {
     "SIGNAL_TO_SIGNAL": "Держим от сигнала до противоположного",
@@ -20,28 +21,24 @@ EXIT_MODES = {
 # 🎯 Фильтры правил
 MIN_CONFIDENCE = 0.70
 MIN_RULES = 10
+MIN_SIGNALS = 5
 
-# 📈 Символы для теста
-TEST_SYMBOLS = {
-    "#GMKN": "D1",
-    "#GMKN": "H4",
-    "#GMKN": "H1",
-    "#LKOH": "D1",
-    "#LKOH": "H4",
-    "#LKOH": "H1",
-    "#SBER": "D1",
-    "#SBER": "H4",
-    "#SBER": "H1",
-    "EURUSDrfd": "D1",
-    "EURUSDrfd": "H4",
-    "EURUSDrfd": "H1",
-    "USDCADrfd": "D1",
-    "USDCADrfd": "H4",
-    "USDCADrfd": "H1",
-    "USDJPYrfd": "D1",
-    "USDJPYrfd": "H4",
-    "USDJPYrfd": "H1",
-    "#ROSN": "D1",
-    "#ROSN": "H4",
-    "#ROSN": "H1"
+# 📈 Символы для теста С SL_MULTIPLIER
+SL_MULTIPLIER = {
+    '#': 1.2,      # Все акции
+    'rfd': 1.2     # Все форекс
 }
+
+TEST_SYMBOLS = ["GBPUSDrfd", "EURUSDrfd", "#SBER", "#ROSN", "USDCADrfd", "#NVTK", "USDJPYrfd",
+           "#MOEX", "USDCHFrfd", "#LKOH", "NZDUSDrfd", "#GAZP", "#PHOR", "AUDUSDrfd", "USDRUBrfd",
+           "#GMKN", "#MTSS", "#VTBR", "#T"]
+TEST_TIMEFRAMES = ["D1", "H4", "H1", "M15"]
+CANDLES_BY_TF = {
+    'M15': 20000,  # ~4 месяца
+    'H1':  12000,  # ~1.5 года
+    'H4':  6000,   # ~6 лет
+    'D1':  3000    # ~12 лет
+}
+
+def get_candles(tf):
+    return CANDLES_BY_TF.get(tf, 35000)

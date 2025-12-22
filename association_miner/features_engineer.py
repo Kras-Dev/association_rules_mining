@@ -297,17 +297,17 @@ class Features:
         print("[Features]: 1/5 Базовые свечи...", end=" ")
         base = self.create_candle_features(df)
 
-        print("[Features]: 2/5 Volume комбо...", end=" ")
+        print("\n[Features]: 2/5 Volume комбо...", end=" ")
         vol_combos = self.add_volume_combos(base, df)
 
-        print("[Features]: 3/5 Трендовые MA...", end=" ")
+        print("\n[Features]: 3/5 Трендовые MA...", end=" ")
         trend_features = self.add_trend_ma(df, vol_combos)
 
-        print("[Features]: 4/5 Последовательности...", end=" ")
+        print("\n[Features]: 4/5 Последовательности...", end=" ")
         sequences = self.add_sequences(trend_features, df)  # ← trend_features вместо vol_combos!
 
-        print("[Features]: 5/5 Target...", end=" ")
+        print("\n[Features]: 5/5 Target...", end=" ")
         final = self.create_target(df, sequences)
 
-        print(f"[Features]: ИТОГО: {len(final.select_dtypes('int64').columns)} бинарных фич")
+        print(f"\n[Features]: ИТОГО: {len(final.select_dtypes('int64').columns)} бинарных фич")
         return final
