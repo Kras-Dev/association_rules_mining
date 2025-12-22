@@ -31,10 +31,14 @@ SL_MULTIPLIER = {
 
 TEST_SYMBOLS = ["GBPUSDrfd", "EURUSDrfd", "#SBER", "#ROSN", "USDCADrfd", "#NVTK", "USDJPYrfd",
            "#MOEX", "USDCHFrfd", "#LKOH", "NZDUSDrfd", "#GAZP", "#PHOR", "AUDUSDrfd", "USDRUBrfd",
-           "#GMKN", "#MTSS", "#VTBR", "#T"]
-TEST_TIMEFRAMES = ["D1", "H4", "H1", "M15"]
+           "#GMKN", "#MTSS", "#VTBR", "#T", "#MGNT", "#CHMF", "#TATN", "#PLZL", "EURRUBrfd", "USDCNYrfd",
+                "CNYRUBrfd", "#ALRS", "XAGUSDrfd", "XAUUSDrfd"]
+
+TEST_TIMEFRAMES = ["D1", "H4", "H1", "M30", "M15"]
+
 CANDLES_BY_TF = {
     'M15': 20000,  # ~4 месяца
+    'M30': 16000,
     'H1':  12000,  # ~1.5 года
     'H4':  6000,   # ~6 лет
     'D1':  3000    # ~12 лет

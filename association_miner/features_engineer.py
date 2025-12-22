@@ -1,52 +1,35 @@
 import logging
-
 import numpy as np
 import pandas as pd
 import talib
-from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-
 class Features:
     """🔥 Генератор свечных признаков: base → volume → sequences → target"""
-    def __init__(self, verbose: bool = False):
+
+    def __init__(self, verbose: bool = True):
+        """verbose=True → INFO логи | ERROR всегда активны"""
         self.verbose = verbose
 
-    def _log_features(self, features: pd.DataFrame, stage: str = "features") -> None:
-        """Логгер количества бинарных признаков"""
+    def _log_info(self, message: str):
+        """INFO только если verbose=True"""
+        if self.verbose:
+            logger.info(message)
+
+    def _log_features(self, features: pd.DataFrame, stage: str = "features"):
+        """Логгер количества фич (только INFO)"""
         if not self.verbose:
             return
-
         binary_cols = features.select_dtypes(include=['int64']).columns.tolist()
         logger.info(f"[Features]: ✅ {len(binary_cols)} бинарных {stage}!")
-        logger.debug(f"[Features]: 📊 Бинарные фичи: {binary_cols[:10]}...")  # первые 10
 
     def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
-        """
-        Рассчитывает ATR (Average True Range) для сравнения волатильности.
-
-        Args:
-            df: DataFrame с колонками ['high', 'low', 'close']
-            period: период для ATR (по умолчанию 14)
-
-        Returns:
-            pd.Series с ATR значениями
-        """
         high, low, close = df['high'], df['low'], df['close']
         atr = talib.ATR(high.values, low.values, close.values, timeperiod=period)
         return pd.Series(atr, index=df.index).bfill()
 
     def create_candle_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Создаёт базовые свечные признаки (OHLC геометрия + паттерны).
-
-        Args:
-            df: DataFrame с колонками ['open', 'high', 'low', 'close', 'tick_volume']
-
-        Returns:
-            pd.DataFrame с бинарными признаками
-        """
         o, h, l, c = df['open'], df['high'], df['low'], df['close']
         features = pd.DataFrame(index=df.index)
 
@@ -56,17 +39,17 @@ class Features:
         features['lower_shadow'] = np.minimum(c, o) - l
         features['total_range'] = h - l
 
-        # % ОТ РЕЙНДЖА (float)
+        # % ОТ РЕЙНДЖА
         features['body_pct'] = features['body_size'] / features['total_range'].replace(0, np.nan)
         features['upper_shadow_pct'] = features['upper_shadow'] / features['total_range'].replace(0, np.nan)
         features['lower_shadow_pct'] = features['lower_shadow'] / features['total_range'].replace(0, np.nan)
 
-        # ПОЗИЦИЯ CLOSE (бинарные)
+        # ПОЗИЦИЯ CLOSE
         features['close_top_30'] = (c >= h - (h - l) * 0.3).astype(int)
         features['close_bottom_30'] = (c <= l + (h - l) * 0.3).astype(int)
         features['close_middle'] = ((features['close_top_30'] == 0) & (features['close_bottom_30'] == 0)).astype(int)
 
-        # СВЕЧНЫЕ ПАТТЕРНЫ (классика)
+        # СВЕЧНЫЕ ПАТТЕРНЫ
         features['doji'] = (features['body_pct'] < 0.1).astype(int)
         features['marubozu'] = (features['body_pct'] > 0.9).astype(int)
         features['hammer'] = ((features['lower_shadow_pct'] > 0.6) & (features['body_pct'] < 0.3)).astype(int)
@@ -91,20 +74,26 @@ class Features:
         features['big_green'] = ((features['bullish'] == 1) & (features['body_pct'] > 0.6)).astype(int)
         features['big_red'] = ((features['bearish'] == 1) & (features['body_pct'] > 0.6)).astype(int)
 
+        # 🔥 ORDER BLOCKS (SMC)
+        h1, l1, c1 = h.shift(1), l.shift(1), c.shift(1)
+        o1 = o.shift(1)
+
+        # ✅ BULLISH OB: Медвежья свеча + сильный рост
+        features['is_bullish_ob'] = (
+                (c1 < o1) &  # Предыдущая свеча медвежья (красная)
+                (c > h1 * 1.002)  # Текущая пробила high предыдущей
+        ).astype(int)
+
+        # ✅ BEARISH OB: Бычья свеча + сильное падение
+        features['is_bearish_ob'] = (
+                (c1 > o1) &  # Предыдущая свеча бычья (зеленая)
+                (c < l1 * 0.998)  # Текущая пробила low предыдущей
+        ).astype(int)
+
         self._log_features(features, "БАЗОВЫХ свечных")
         return features
 
     def add_volume_combos(self, candle_features: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Добавляет volume фичи + ДИНАМИЧЕСКИЕ комбинации паттерн×volume.
-
-        Args:
-            candle_features: результат create_candle_features()
-            df: исходный DataFrame (нужен tick_volume)
-
-        Returns:
-            pd.DataFrame с volume комбинациями
-        """
         features = candle_features.copy()
         tv = df['tick_volume']
 
@@ -127,79 +116,19 @@ class Features:
         self._log_features(features, "VOLUME_КОМБО")
         return features
 
-    def add_equal_extremes(self, features: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Равные экстремумы: H(n-1)≈H(n), L(n-1)≈L(n) — уровни поддержки/сопротивления
-        """
-        extremes_features = pd.DataFrame(index=df.index)
-        h, l = df['high'], df['low']
-        h1, l1 = h.shift(1), l.shift(1)
-
-        # 🔥 АДАПТИВНАЯ ТОЧНОСТЬ: ATR * 0.05
-        atr = self.calculate_atr(df, 14)
-        tolerance_dynamic = atr * 0.05
-
-        # Равные экстремумы
-        extremes_features['equal_high'] = (abs(h - h1) < tolerance_dynamic).astype(int)
-        extremes_features['equal_low'] = (abs(l - l1) < tolerance_dynamic).astype(int)
-
-        # Volume комбинации (БЕЗОПАСНО)
-        vol_types = ['vol_spike', 'vol_drop', 'vol_up', 'vol_down']
-        for extreme in ['equal_high', 'equal_low']:
-            for vol in vol_types:
-                extremes_features[f'{extreme}_{vol}'] = (
-                        extremes_features[extreme] & features[vol].fillna(0).astype(int)
-                ).astype(int)
-
-        # 🔥 ИСПРАВЛЕНО: fillna(0).astype(int) ПЕРЕД &
-        extremes_features['equal_high_prev_bullish'] = (
-                extremes_features['equal_high'] &
-                features['bullish'].shift(1).fillna(0).astype(int)
-        ).astype(int)
-
-        extremes_features['equal_low_prev_bearish'] = (
-                extremes_features['equal_low'] &
-                features['bearish'].shift(1).fillna(0).astype(int)
-        ).astype(int)
-
-        # В add_equal_extremes ДОБАВЬ мощные комбинации:
-        extremes_features['equal_high_rejection'] = (
-                extremes_features['equal_high'] &
-                features['upper_shadow_long'] &
-                features['bearish']
-        ).astype(int)  # Отбой от сопротивления!
-
-        extremes_features['equal_low_bounce'] = (
-                extremes_features['equal_low'] &
-                features['lower_shadow_long'] &
-                features['bullish']
-        ).astype(int)  # Отбой от поддержки!
-
-        return extremes_features
-
     def add_sequences(self, features: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Добавляет ДИНАМИЧЕСКИЕ последовательности + классические паттерны.
-
-        Args:
-            features: результат add_volume_combos()
-            df: исходный DataFrame (OHLC)
-
-        Returns:
-            pd.DataFrame с последовательностями
-        """
         seq_features = features.copy()
         o, h, l, c = df['open'], df['high'], df['low'], df['close']
         o1, h1, l1, c1 = o.shift(1), h.shift(1), l.shift(1), c.shift(1)
 
-        # Base patterns
+        # Base patterns для последовательностей
         binary_cols = features.select_dtypes(include=['int64']).columns.tolist()
         base_patterns = [col for col in binary_cols
                          if not col.startswith('vol_')
                          and col not in ['next_up', 'next_down']
                          and (features[col] == 1).sum() > 45]
 
-        logger.info(f"🔄 Генерируем {len(base_patterns)}^2 = {len(base_patterns) ** 2} последовательностей...")
+        self._log_info(f"🔄 Генерируем {len(base_patterns)}^2 = {len(base_patterns) ** 2} последовательностей...")
 
         sequence_columns = []
 
@@ -231,83 +160,100 @@ class Features:
         for col in equal_extremes.columns:
             sequence_columns.append(equal_extremes[col])
 
-        # ОДИН pd.concat
         new_seq_df = pd.concat(sequence_columns, axis=1)
-
-        # Объединяем БЕЗ дублей
         result = pd.concat([seq_features, new_seq_df], axis=1)
-        result = result.loc[:, ~result.columns.duplicated()]  # убираем дубли
+        result = result.loc[:, ~result.columns.duplicated()]
 
-        self._log_features(result, "ПОСЛЕДОВАТЕЛЬНОСТЕЙ + EQUAL_EXTREMES")
+        self._log_features(result, "ПОСЛЕДОВАТЕЛЬНОСТЕЙ")
+        return result
+
+    def add_equal_extremes(self, features: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+        """🔥 Равные экстремумы (двойные/тройные вершины-днища)"""
+        h, l, c = df['high'], df['low'], df['close']
+
+        # Shifted highs/lows
+        h1, l1 = h.shift(1), l.shift(1)
+        h2, l2 = h.shift(2), l.shift(2)
+        h3, l3 = h.shift(3), l.shift(3)
+
+        result = pd.DataFrame(index=features.index)
+
+        # Двойные вершины (highs в пределах 0.05%)
+        result['double_top'] = (
+                (h >= h1 * 0.9995) & (h1 >= h2 * 0.999) &
+                (c < h * 0.998)  # Закрытие ниже вершины
+        ).astype(int)
+
+        # Двойные днища
+        result['double_bottom'] = (
+                (l <= l1 * 1.0005) & (l1 <= l2 * 1.001) &
+                (c > l * 1.002)  # Закрытие выше дна
+        ).astype(int)
+
+        # Тройные
+        result['triple_top'] = (
+                (h >= h1 * 0.9995) & (h >= h2 * 0.999) & (h >= h3 * 0.998)
+        ).astype(int)
+        result['triple_bottom'] = (
+                (l <= l1 * 1.0005) & (l <= l2 * 1.001) & (l <= l3 * 1.002)
+        ).astype(int)
+
+        # С volume спайком
+        if 'vol_spike' in features.columns:
+            result['double_top_vol'] = (result['double_top'] & features['vol_spike']).astype(int)
+            result['double_bottom_vol'] = (result['double_bottom'] & features['vol_spike']).astype(int)
+
+        self._log_features(result, "EQUAL_EXTREMES")
         return result
 
     def add_trend_ma(self, df: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
-        """🚀 Трендовые MA: 21/50/200 для H1/H4/D1"""
         ma21 = df['close'].rolling(21).mean()
         ma50 = df['close'].rolling(50).mean()
         ma200 = df['close'].rolling(200).mean()
 
-        # 🟢 СТАРЫЕ (относительные)
         features['ma_bull_21_50'] = (ma21 > ma50).astype(int)
         features['ma_bear_21_50'] = (ma21 < ma50).astype(int)
         features['ma_bull_all'] = ((ma21 > ma50) & (ma50 > ma200)).astype(int)
         features['ma_bear_all'] = ((ma21 < ma50) & (ma50 < ma200)).astype(int)
 
-        # АБСОЛЮТНЫЕ ПОЗИЦИИ ЦЕНЫ!
         features['price_above_all_ma'] = ((df['close'] > ma21) & (df['close'] > ma50) & (df['close'] > ma200)).astype(
-            int)  # 🟢 ВЫШЕ ВСЕХ!
+            int)
         features['price_below_all_ma'] = ((df['close'] < ma21) & (df['close'] < ma50) & (df['close'] < ma200)).astype(
-            int)  # 🔴 НИЖЕ ВСЕХ!
+            int)
 
-        # КОНТЕКСТ ДЛЯ ПАТТЕРНОВ
-        features['bearish_below_all_ma'] = (features['bearish'] & features['price_below_all_ma']).astype(
-            int)  # 📉 Продолжение DOWN!
-        features['bullish_above_all_ma'] = (features['bullish'] & features['price_above_all_ma']).astype(
-            int)  # 📈 Продолжение UP!
+        features['bearish_below_all_ma'] = (features['bearish'] & features['price_below_all_ma']).astype(int)
+        features['bullish_above_all_ma'] = (features['bullish'] & features['price_above_all_ma']).astype(int)
 
         return features
 
     def create_target(self, df: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
-        """
-        Добавляет целевые переменные для обучения.
-
-        Args:
-            df: исходный DataFrame
-            features: фичи с последовательностями
-
-        Returns:
-            features с next_up/next_down
-        """
         features['next_up'] = (df['close'].shift(-1) > df['close']).astype(int)
         features['next_down'] = (df['close'].shift(-1) < df['close']).astype(int)
         self._log_features(features, "FINALS с target")
         return features
 
     def create_all_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Полный пайплайн: base → volume → sequences → target.
+        """✅ Полный пайплайн БЕЗ СПАМА"""
+        self._log_info("[Features]: Запуск пайплайна...")
 
-        Returns:
-            pd.DataFrame с  признаками
-        """
-        logger.info("[Features]: Запуск полного пайплайна Features...")
-
-        print("[Features]: Генерация фич...")
-
-        print("[Features]: 1/5 Базовые свечи...", end=" ")
+        # 1. Базовые свечи
+        self._log_info("[Features]: 1/5 Базовые свечи...")
         base = self.create_candle_features(df)
 
-        print("\n[Features]: 2/5 Volume комбо...", end=" ")
+        # 2. Volume
+        self._log_info("[Features]: 2/5 Volume комбо...")
         vol_combos = self.add_volume_combos(base, df)
 
-        print("\n[Features]: 3/5 Трендовые MA...", end=" ")
+        # 3. MA
+        self._log_info("[Features]: 3/5 Трендовые MA...")
         trend_features = self.add_trend_ma(df, vol_combos)
 
-        print("\n[Features]: 4/5 Последовательности...", end=" ")
-        sequences = self.add_sequences(trend_features, df)  # ← trend_features вместо vol_combos!
+        # 4. Sequences
+        self._log_info("[Features]: 4/5 Последовательности...")
+        sequences = self.add_sequences(trend_features, df)
 
-        print("\n[Features]: 5/5 Target...", end=" ")
+        # 5. Target
+        self._log_info("[Features]: 5/5 Target...")
         final = self.create_target(df, sequences)
 
-        print(f"\n[Features]: ИТОГО: {len(final.select_dtypes('int64').columns)} бинарных фич")
         return final

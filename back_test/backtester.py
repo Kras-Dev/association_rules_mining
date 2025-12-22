@@ -2,20 +2,26 @@
 
 import os
 import pickle
+from pathlib import Path
+
 import pandas as pd
 import talib
 from typing import Dict, Optional
 from tqdm import tqdm
-from association_miner.features_engineer import Features
+import logging
 from back_test.config import *
 from back_test.trade import PositionManager, Trade
 from back_test.metrics import MetricsCalculator
 
 
-class Backtester:
-    """🔥 Бэктестер стратегии паттернов"""
+logger = logging.getLogger(__name__)
 
-    def __init__(self, symbol: str):
+
+class Backtester:
+    """🔥 Бэктестер с verbose контролем"""
+
+    def __init__(self, symbol: str, verbose: bool = True, history_dir: Path = None):
+        self.verbose = verbose
         self.rules: pd.DataFrame = None
         self.capital = INITIAL_CAPITAL
         self.trades: list[Trade] = []
@@ -23,103 +29,91 @@ class Backtester:
         self.exit_mode = "SIGNAL_TO_SIGNAL"
         self.symbol = symbol
         self.timeframe = None
+        self.exp_dir = history_dir or Path("history/active")
+        self.models_dir = self.exp_dir / "models"
+
+    def _log_info(self, message: str):
+        if self.verbose:
+            logger.info(message)
 
     def load_rules(self, symbol: str, timeframe: str) -> pd.DataFrame:
-        """Загрузка правил"""
-        cache_file = f"models/rules_{symbol}_{timeframe}.pkl"
-        if not os.path.exists(cache_file):
-            raise FileNotFoundError(f"[BackTester]: ❌ Нет {cache_file}")
+        cache_file = self.models_dir / f"rules_{symbol}_{timeframe}.pkl"
+        if not cache_file.exists():
+            logger.error(f"[BackTester]: ❌ Нет {cache_file}")
+            return pd.DataFrame()
 
         with open(cache_file, 'rb') as f:
             cache = pickle.load(f)
+        top_rules_df = cache['top_rules']
+        if top_rules_df.empty:
+            return pd.DataFrame()
 
-        rules = cache['top_rules'][cache['top_rules']['confidence'] > MIN_CONFIDENCE]
-        print(f"[BackTester]: ✅ {len(rules)} правил >{MIN_CONFIDENCE:.0%} conf")
-
+        rules = top_rules_df[top_rules_df['confidence'] > MIN_CONFIDENCE]
+        self._log_info(f"[BackTester]: ✅ {len(rules)} правил >{MIN_CONFIDENCE:.0%} conf")
         return rules
 
     def get_active_rules(self, features_row: pd.Series) -> pd.DataFrame:
-        """🔍 АКТИВНЫЕ ПРАВИЛА - СОХРАНЯЕМ КОЛОНКИ!"""
         matched_rules = []
-
         for idx, rule in self.rules.iterrows():
             rule_name = rule['rule_name']
-            matched_features = []
-
-            # Матчинг по словам (минимум 2 совпадения)
-            rule_words = rule_name.split('_')
-            for word in rule_words:
-                if word != 'prev' and features_row.get(word, 0) == 1:
-                    matched_features.append(word)
-
+            matched_features = [word for word in rule_name.split('_')
+                                if word != 'prev' and features_row.get(word, 0) == 1]
             if len(matched_features) >= 2:
-                # ✅ СОХРАНЯЕМ ВСЮ СТРОКУ С КОЛОНКАМИ!
                 matched_rules.append(rule.to_dict())
+        return pd.DataFrame(matched_rules) if matched_rules else pd.DataFrame()
 
-        if matched_rules:
-            df_result = pd.DataFrame(matched_rules)
-            return df_result
-        else:
-            return pd.DataFrame()  # ✅ ПУСТОЙ DataFrame с колонками!
-
-    def run_backtest(self, df: pd.DataFrame, symbol: str, timeframe: str,
-                     exit_mode: str = "SIGNAL_TO_SIGNAL") -> Optional[Dict]:
-        """🔥 Запуск бэктеста С ПРОВЕРКОЙ СИГНАЛОВ"""
+    def run_backtest(self, df: pd.DataFrame, features: pd.DataFrame, symbol: str,
+                     timeframe: str, exit_mode: str = "SIGNAL_TO_SIGNAL",
+                     verbose: Optional[bool] = None) -> Dict:
+        """🔥 Бэктест с контролем verbose"""
+        self.verbose = verbose if verbose is not None else self.verbose
         self.exit_mode = exit_mode
         self.reset()
         self.symbol = symbol
         self.timeframe = timeframe
 
-        print(f"\n[BackTester]: {symbol} {timeframe} | {exit_mode}")
-        print(f"[BackTester]:📊 {len(df)} свечей")
-
-        # ✅ ШАГ 1: БЫСТРАЯ ПРОВЕРКА СИГНАЛОВ
-        print("[BackTester]: Проверяем наличие сигналов...")
-
-        # Загружаем правила и фичи ОДИН РАЗ
+        self._log_info(f"[BackTester]: {symbol} {timeframe} | {exit_mode}")
         self.rules = self.load_rules(symbol, timeframe)
+        rules_count = len(self.rules) if not self.rules.empty else 0
         if self.rules.empty:
-            print(f"[BackTester]: ❌ {symbol} {timeframe} | Нет правил >{MIN_CONFIDENCE:.0%} conf")
             return {'error': 'Нет правил'}
 
-        features = Features(verbose=False).create_all_features(df)
+        self._log_info(f"[Features]: Используем {features.shape[1]} готовых фич")
 
-        # ✅ БЫСТРАЯ СКАННИНГ (только проверка сигналов!)
+        # Быстрая проверка сигналов
         signal_count = 0
-        for i in range(200, min(1000, len(df))):  # Проверяем только 800 баров!
+        desc = "🔍 Signals" if self.verbose else None
+        for i in tqdm(range(200, min(1000, len(df))), desc=desc, miniters=100, disable=not self.verbose):
             active_rules = self.get_active_rules(features.iloc[i])
             if not active_rules.empty and 'direction' in active_rules.columns:
                 signal_count += 1
 
-        print(f"[BackTester]: ✅ Найдено {signal_count} потенциальных сигналов")
-
-        if signal_count == 0 :
-            print(f"[BackTester]: ❌ {symbol} {timeframe} | {exit_mode} | Нет сделок (SKIP)")
+        if signal_count == 0:
             return {'error': 'Нет сигналов'}
 
-        # ✅ ШАГ 2: ПОЛНЫЙ БЭКТЕСТ (только если есть сигналы!)
-
         atr = self.calculate_atr(df)
-        with tqdm(total=len(df) - 200,
-                  desc=f"{symbol} {timeframe} {exit_mode}",
-                  position=0, leave=False,
-                  bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+        desc = f"💹 Backtest {symbol[:6]}" if self.verbose else None
+        with tqdm(total=len(df) - 200, desc=desc, miniters=500, leave=self.verbose, disable=not self.verbose) as pbar:
             for i in range(200, len(df)):
                 self._process_bar(df.iloc[i], features.iloc[i], atr.iloc[i], i)
-                pbar.update(1)
-                pbar.set_postfix({
-                    'Capital': f"${self.capital:.0f}",
-                    'Trades': len(self.trades),
-                    'Pos': 'YES' if self.position else 'NO'
-                }, refresh=False)
+                if self.verbose:
+                    pbar.update(1)
+                    pbar.set_postfix({
+                        'Capital': f"${self.capital:.0f}",
+                        'Trades': len(self.trades),
+                        'Pos': 'YES' if self.position else 'NO'
+                    })
 
-        # Закрываем позицию
         if self.position:
             self._close_position(df.iloc[-1], len(df) - 1)
 
-        metrics = MetricsCalculator.calculate(self.trades, self.capital)
-        metrics['capital'] = self.capital
-        MetricsCalculator.print_metrics(metrics, symbol, timeframe, exit_mode)
+        start_date = df.iloc[200]['time'].strftime('%d-%m-%Y')
+        end_date = df.iloc[-1]['time'].strftime('%d-%m-%Y')
+        period = f"[{start_date} → {end_date}]"
+
+        calculator = MetricsCalculator(verbose=self.verbose)
+        metrics = calculator.calculate(self.trades, INITIAL_CAPITAL, rules_count)
+        calculator.print_metrics(metrics, symbol, timeframe, exit_mode, period, rules_count)
         return metrics
 
 
@@ -150,7 +144,7 @@ class Backtester:
 
         # ✅ ПРОВЕРКА КОЛОНОК!
         if 'direction' not in active_rules.columns:
-            print(f"⚠️ Нет колонки 'direction' в {len(active_rules)} правилах")
+            logger.error(f"⚠️ Нет колонки 'direction' в {len(active_rules)} правилах")
             return
         buy_rules = active_rules[active_rules['direction'] == 'UP']
         sell_rules = active_rules[active_rules['direction'] == 'DOWN']
