@@ -68,44 +68,51 @@ class BacktestRunner:
                 candles_count = get_candles(tf)
                 df_full = client.get_rates(symbol, tf_mt5, candles_count, 1)
 
-                if len(df_full) < 1000:
-                    return symbol, tf, mode, {'error': f'Мало данных ({len(df_full)})'}
+                if df_full is None or len(df_full) < 1000:
+                    return symbol, tf, mode, {'error': 'Мало данных'}
 
-                split_70 = int(len(df_full) * 0.7)
-                train_df = df_full[:split_70]
-                test_df = df_full[split_70:]
+                # ШАГ 1: Считаем фичи ОДИН раз для всей истории (MA будут корректны)
+                feat_gen = Features(verbose=False)
+                df_with_all_features = feat_gen.create_all_features(df_full)
+                # ШАГ 2: Сплитуем данные
+                split_70 = int(len(df_with_all_features) * 0.7)
 
+                # Для Майнера(обучение) отдаем СЫРЫЕ цены (он сам вызовет генерацию фич для train куска)
+                train_df = df_full.iloc[:split_70].copy()
+                # Для Бэктестера отдаем ПРЕДРАССЧИТАННЫЕ фичи (для честных MA)
+                test_df_prices = df_full.iloc[split_70:].copy()
+                test_features = df_with_all_features.iloc[split_70:].copy()
+
+                # 3. Майнер (анализирует train_df)
                 miner = CandleMiner(min_confidence=0.7, min_support=10, verbose=False, history_dir=self.exp_dir)
                 train_results = miner.smart_analyze(train_df, symbol, tf)
 
-                feat_gen = Features(verbose=False)
-                test_features = feat_gen.create_all_features(test_df)
-
+                # ✅ ШАГ 4: Бэктестер (использует test_features с готовыми индикаторами)
                 bt = Backtester(symbol, verbose=False, history_dir=self.exp_dir)
-                metrics = bt.run_backtest(test_df, test_features, symbol, tf, mode, verbose=False)
-
+                metrics = bt.run_backtest(test_df_prices, test_features, symbol, tf, mode, verbose=False)
                 pnl = metrics.get('total_pnl', 0) if 'error' not in metrics else 0
 
                 # ✅ ПЕРИОД + rules_count
-                start_date = test_df.iloc[0]['time'].strftime('%d.%m.%y')
-                end_date = test_df.iloc[-1]['time'].strftime('%d.%m.%y')
-                rules_count = len(train_results['all_rules'])
+                start_date = test_df_prices.iloc[0]['time'].strftime('%d.%m.%y')
+                end_date = test_df_prices.iloc[-1]['time'].strftime('%d.%m.%y')
+
                 if self.verbose:
                     print(f"✅ [{mp.current_process().name}] {symbol} {tf} {start_date}-{end_date}: {pnl:.1f}%")
 
                 metrics.update({
                     'period': f"{start_date}-{end_date}",
-                    'rules_count': rules_count,
+                    'rules_count': len(train_results['all_rules']),
                     'test_date': datetime.now().strftime('%Y-%m-%d %H:%M')
                 })
 
             return symbol, tf, mode, metrics
 
+
         except Exception as e:
-            error_msg = str(e)[:80]
-            if self.verbose:
-                print(f"❌ [{mp.current_process().name}] {symbol} {tf}: {error_msg}")
-            return symbol, tf, mode, {'error': error_msg}
+            import traceback
+            # Печатаем полный стек ошибки, чтобы видеть где именно падает
+            print(f"❌ Ошибка в {symbol} {tf}: {traceback.format_exc()}")
+            return symbol, tf, mode, {'error': str(e)}
 
     def run_parallel(self) -> List[Tuple[str, str, str, Dict[str, Any]]]:
         """🧪 Параллельный запуск всех тестов"""
@@ -119,7 +126,8 @@ class BacktestRunner:
             tasks,
             max_workers=self.max_workers,
             chunksize=10,
-            desc="🧪 Backtests"
+            desc="Backtests",
+            position=0,
         )
 
         self.results = results

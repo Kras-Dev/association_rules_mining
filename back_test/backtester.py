@@ -224,7 +224,8 @@ class Backtester:
             pnl=pnl,
             win=pnl > 0,
             rule=self.position['rule'],
-            pyramid_level=self.position['pyramid_level']
+            pyramid_level=self.position['pyramid_level'],
+            stop_loss=self.position['sl']
         )
 
         self.trades.append(trade)

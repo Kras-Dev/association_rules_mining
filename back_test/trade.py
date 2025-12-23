@@ -17,6 +17,8 @@ class Trade:
     pnl: float
     win: bool
     rule: str
+    stop_loss: float = 0.0
+    take_profit: float = 0.0
     pyramid_level: int = 1
     direction: str = ''
 
@@ -27,8 +29,9 @@ class PositionManager:
     def create_long(entry_price: float, atr: float, size: float,
                     entry_time: pd.Timestamp, entry_idx: int, rule: str) -> Dict:
         sl_distance = min(atr * 2.0, entry_price * 0.015)
+        stop_loss_level = entry_price - sl_distance
         return {
-            'type': 'LONG', 'entry': entry_price, 'sl': entry_price - sl_distance,
+            'type': 'LONG', 'entry': entry_price, 'sl': stop_loss_level,
             'size': size, 'pyramid_level': 1, 'entry_time': entry_time,
             'entry_idx': entry_idx, 'rule': rule
         }
@@ -37,8 +40,9 @@ class PositionManager:
     def create_short(entry_price: float, atr: float, size: float,
                      entry_time: pd.Timestamp, entry_idx: int, rule: str) -> Dict:
         sl_distance = min(atr * 2.0, entry_price * 0.015)
+        stop_loss_level = entry_price + sl_distance
         return {
-            'type': 'SHORT', 'entry': entry_price, 'sl': entry_price + sl_distance,
+            'type': 'SHORT', 'entry': entry_price, 'sl': stop_loss_level,
             'size': size, 'pyramid_level': 1, 'entry_time': entry_time,
             'entry_idx': entry_idx, 'rule': rule
         }

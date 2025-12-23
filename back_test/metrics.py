@@ -36,6 +36,9 @@ class MetricsCalculator:
 
         # ✅ PnL%
         pnl_pct = ((equity[-1] / initial_capital - 1) * 100)
+        total_pnl = trades_df['pnl'].sum()
+        max_dd_money = (peak - equity).max()
+        recovery_factor = total_pnl / max_dd_money if max_dd_money > 0 else total_pnl
 
         return {
             'total_trades': len(trades_df),
@@ -51,6 +54,7 @@ class MetricsCalculator:
             'best_trade': trades_df['pnl'].max() if len(trades_df) > 0 else 0,
             'worst_trade': trades_df['pnl'].min() if len(trades_df) > 0 else 0,
             'rules_count': rules_count,
+            'recovery_factor': round(recovery_factor, 2),
         }
 
     def print_metrics(self, metrics: Dict, symbol: str, tf: str, mode: str, period: str="", rules_count: int = 0):
@@ -79,11 +83,18 @@ class MetricsCalculator:
 
         print(f"\n📊 {symbol} {tf} | {mode}{period_str} | правил: {rules}")
         print("-" * 60)
-
+        # 💰 Final Capital: итоговый капитал (абсолют $) + % прироста от стартового
         print(f"💰 Final Capital:  ${metrics['final_capital']:.2f} ({metrics['total_pnl_pct']:.1f}%)")
+        # 📈 Profit Factor: сумма профитов/сумма лоссов | RR: средний профит/средний лосс
         print(f"📈 Profit Factor:  {metrics['profit_factor']:.2f} | RR: {metrics['rr_ratio']:.2f}")
+        # 🎯 Win Rate: % прибыльных сделок (кол-во всех сделок)
         print(f"🎯 Win Rate:       {metrics['win_rate'] * 100:.1f}% ({metrics['total_trades']} сделок)")
+        # 📉 Max DD: максимальная просадка капитала (% от пика)
         print(f"📉 Max DD:         {metrics['max_dd_pct']:.1f}%")
+        # ⭐ Best: самая прибыльная сделка ($) | 💥 Worst: самая убыточная сделка ($)
         print(f"⭐ Best:           ${metrics['best_trade']:.2f}")
         print(f"💥 Worst:          ${metrics['worst_trade']:.2f}")
+        # 🛡️ Коэффициент восстановления (RF)
+        print(f"🛡️ Recovery Factor:   {metrics['recovery_factor']:.2f}")
+        # 📊 Avg Win/Loss: средний профит выигрышей / средний лосс проигрышей
         print(f"📊 Avg Win/Loss:   ${metrics['avg_win']:.2f} / ${metrics['avg_loss']:.2f}")
