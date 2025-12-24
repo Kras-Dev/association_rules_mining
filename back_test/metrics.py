@@ -24,7 +24,8 @@ class MetricsCalculator(BaseLogger):
         self.verbose = verbose
 
 
-    def calculate(self, trades: List[Trade], initial_capital: float, rules_count: int = 0) -> Dict:
+    def calculate(self, trades: List[Trade], initial_capital: float,
+                  rules_count: int = 0,  sl_hits: int = 0) -> Dict:
         """
         Рассчитывает основные показатели эффективности стратегии.
 
@@ -84,6 +85,7 @@ class MetricsCalculator(BaseLogger):
             'worst_trade': trades_df['pnl'].min() if len(trades_df) > 0 else 0,
             'rules_count': rules_count,
             'recovery_factor': round(recovery_factor, 2),
+            'sl_hits': sl_hits,
         }
 
     def print_metrics(self, metrics: Dict, symbol: str, tf: str, mode: str, period: str="", rules_count: int = 0):
@@ -138,3 +140,4 @@ class MetricsCalculator(BaseLogger):
         print(f"🛡️ Recovery Factor: {metrics['recovery_factor']:.2f}")
         # 📊 Avg Win/Loss: средний профит выигрышей / средний лосс проигрышей
         print(f"📊 Avg Win/Loss:    ${metrics['avg_win']:.2f} / ${metrics['avg_loss']:.2f}")
+        print(f" sl_hits:            {metrics['sl_hits']}")

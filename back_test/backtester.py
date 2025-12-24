@@ -44,6 +44,7 @@ class Backtester(BaseFileHandler):
         self.exit_mode = "SIGNAL_TO_SIGNAL"
         self.symbol = symbol
         self.timeframe = None
+        self.total_sl_hits = 0
 
     def load_rules(self, symbol: str, timeframe: str) -> pd.DataFrame:
         """
@@ -158,7 +159,7 @@ class Backtester(BaseFileHandler):
         period = f"[{start_date} → {end_date}]"
         # Расчет и вывод метрик
         calculator = MetricsCalculator(verbose=self.verbose)
-        metrics = calculator.calculate(self.trades, INITIAL_CAPITAL, rules_count)
+        metrics = calculator.calculate(self.trades, INITIAL_CAPITAL, rules_count, sl_hits=self.total_sl_hits,)
         calculator.print_metrics(metrics, symbol, timeframe, exit_mode, period, rules_count)
         return metrics
 
@@ -300,6 +301,19 @@ class Backtester(BaseFileHandler):
         # Если есть переопределение (сработал SL/TP), используем его.
         # Иначе используем цену закрытия бара (для выхода по сигналу/времени).
         final_exit_price = self.position.pop('exit_price_override', row['close'])
+        if 'exit_price_override' in self.position:
+            # Если цена была переопределена, значит, сработал SL или TP.
+            is_sl = False
+            if self.position['type'] == 'LONG':
+                # SL ниже цены входа, TP выше цены входа
+                is_sl = (final_exit_price <= self.position['sl'])
+            else:  # SHORT
+                # SL выше цены входа, TP ниже цены входа
+                is_sl = (final_exit_price >= self.position['sl'])
+
+            if is_sl:
+                self.total_sl_hits += 1
+
         # Расчет PnL (profit and loss)
         pnl = self.pos_manager.calculate_pnl(self.position, final_exit_price)
 
@@ -334,3 +348,4 @@ class Backtester(BaseFileHandler):
         self.capital = INITIAL_CAPITAL
         self.trades = []
         self.position = None
+        self.total_sl_hits = 0

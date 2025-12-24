@@ -1,28 +1,25 @@
-import logging
 import numpy as np
 import pandas as pd
 import talib
 
-logger = logging.getLogger(__name__)
+from utils.base_logger import BaseLogger
 
-class Features:
-    """🔥 Генератор свечных признаков: base → volume → sequences → target"""
 
-    def __init__(self, verbose: bool = True):
+class Features(BaseLogger):
+    """Генератор свечных признаков: base → volume → sequences → target"""
+
+    def __init__(self, verbose: bool = False):
         """verbose=True → INFO логи | ERROR всегда активны"""
-        self.verbose = verbose
+        super().__init__(verbose)
 
-    def _log_info(self, message: str):
-        """INFO только если verbose=True"""
-        if self.verbose:
-            logger.info(message)
+
 
     def _log_features(self, features: pd.DataFrame, stage: str = "features"):
         """Логгер количества фич (только INFO)"""
         if not self.verbose:
             return
         binary_cols = features.select_dtypes(include=['int64']).columns.tolist()
-        logger.info(f"[Features]: ✅ {len(binary_cols)} бинарных {stage}!")
+        self._log_info(f" ✅ {len(binary_cols)} бинарных {stage}!")
 
     def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
         high, low, close = df['high'], df['low'], df['close']
