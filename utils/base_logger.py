@@ -2,7 +2,7 @@ import inspect
 import logging
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(levelname)s: %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -29,6 +29,10 @@ class BaseLogger:
                 break
 
         return f"[{cls_name}.{method_name}]"
+
+    def _log_debug(self, message: str):
+        if self.verbose:
+            logger.debug(f"{self._get_context()}: {message}")
 
     def _log_info(self, message: str):
         """Информационные сообщения (фильтруются по verbose)"""

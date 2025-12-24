@@ -13,7 +13,7 @@ class CandleMiner(BaseFileHandler):
     Находит правила (features), которые предсказывают движение цены с уверенностью (confidence) 60%+.
     """
 
-    def __init__(self, min_confidence: float = 0.60, min_support: int = 10, verbose: bool = False,
+    def __init__(self, min_confidence: float = 0.60, min_support: int = 21, verbose: bool = False,
                  history_dir: Path = None):
         """
         Инициализация майнера правил.
@@ -78,11 +78,9 @@ class CandleMiner(BaseFileHandler):
         """
         buy_conditions, sell_conditions = [], []
         # Отбираем только бинарные признаки (0 или 1), исключая целевые переменные
-        binary_features = [col for col in features.select_dtypes(include=['int64']).columns
-                           if col not in ['next_up', 'next_down']]
-
-        mean_up = features['next_up'].mean()
-        mean_down = features['next_down'].mean()
+        binary_features = [col for col in features.columns
+                           if features[col].nunique() <= 2 and
+                           col not in ['next_up', 'next_down']]
 
         self._log_info(f"Тестируем {len(binary_features)} признаков...")
 

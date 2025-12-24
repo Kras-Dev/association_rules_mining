@@ -110,6 +110,11 @@ class Backtester(BaseFileHandler):
         Returns:
             Dict: Словарь с метриками производительности стратегии.
         """
+        # СИНХРОНИЗАЦИЯ. Оставляем только те строки, которые есть в обоих датафреймах
+        common_index = df.index.intersection(features.index)
+        df = df.loc[common_index].copy()
+        features = features.loc[common_index].copy()
+
         self.exit_mode = exit_mode
         self.reset()
         self.symbol = symbol
@@ -127,8 +132,8 @@ class Backtester(BaseFileHandler):
 
         # Быстрая проверка сигналов для оценки перспективности
         signal_count = 0
-        # Используем tqdm для прогресс-баров
-        for i in tqdm(range(200, min(1000, len(df))), desc="Signals", miniters=100, disable=not self.verbose):
+        limit = min(1000, len(df))
+        for i in tqdm(range(limit), desc="Signals", miniters=100, disable=not self.verbose):
             active_rules = self.get_active_rules(features.iloc[i])
             if not active_rules.empty and 'direction' in active_rules.columns:
                 signal_count += 1
@@ -136,6 +141,7 @@ class Backtester(BaseFileHandler):
         if signal_count == 0:
             self._log_warning("⚠️ Нет сигналов для теста, тест пропущен.")
             return {'error': 'Нет сигналов'}
+
         # --- Основной цикл симуляции ---
         # Расчет ATR (Average True Range) для управления рисками
         atr = self.calculate_atr(df)
@@ -154,7 +160,7 @@ class Backtester(BaseFileHandler):
         if self.position:
             self._close_position(df.iloc[-1], len(df) - 1)
         # Форматирование периода теста
-        start_date = df.iloc[200]['time'].strftime('%d-%m-%Y')
+        start_date = df.iloc[0]['time'].strftime('%d-%m-%Y')
         end_date = df.iloc[-1]['time'].strftime('%d-%m-%Y')
         period = f"[{start_date} → {end_date}]"
         # Расчет и вывод метрик
@@ -300,16 +306,16 @@ class Backtester(BaseFileHandler):
         # Определяем итоговую цену выхода:
         # Если есть переопределение (сработал SL/TP), используем его.
         # Иначе используем цену закрытия бара (для выхода по сигналу/времени).
+        has_override = 'exit_price_override' in self.position
+        # 2. Извлекаем цену (теперь ключ удалится из self.position)
         final_exit_price = self.position.pop('exit_price_override', row['close'])
-        if 'exit_price_override' in self.position:
-            # Если цена была переопределена, значит, сработал SL или TP.
+        if has_override:
             is_sl = False
             if self.position['type'] == 'LONG':
-                # SL ниже цены входа, TP выше цены входа
-                is_sl = (final_exit_price <= self.position['sl'])
+                # Для LONG стоп всегда ниже или равен цене выхода (с учетом проскальзывания/гэпа)
+                is_sl = (final_exit_price <= self.position['sl'] + 1e-9)
             else:  # SHORT
-                # SL выше цены входа, TP ниже цены входа
-                is_sl = (final_exit_price >= self.position['sl'])
+                is_sl = (final_exit_price >= self.position['sl'] - 1e-9)
 
             if is_sl:
                 self.total_sl_hits += 1
