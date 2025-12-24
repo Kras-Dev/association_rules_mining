@@ -202,7 +202,8 @@ class BacktestRunner:
         print("=" * 80)
 
     def get_live_candidates(self, min_pnl_pct: float = 15.0, max_dd: float = 15.0,
-                            min_trades: int = 100, min_rr: float = 1.2, min_pf: float = 1.1) -> List[Dict]:
+                            min_trades: int = 49, min_rr: float = 1.2, min_pf: float = 1.1,
+                            min_rf: float = 1.5) -> List[Dict]:
         """🎯 ЛИДЕРЫ ДЛЯ LIVE ТРЕЙДИНГА (НОВЫЕ КРИТЕРИИ!)"""
         candidates = []
 
@@ -210,20 +211,23 @@ class BacktestRunner:
             if 'error' in metrics:
                 continue
 
-            # ✅ PnL% (если нет в metrics - считаем)
+            # PnL% (если нет в metrics - считаем)
             pnl_pct = metrics.get('total_pnl_pct', 0)
             if pnl_pct == 0:
                 final_capital = metrics.get('final_capital', 10000)
                 pnl_pct = ((final_capital / 10000 - 1) * 100)
 
-            # ✅ RR Ratio (если нет в metrics - считаем)
+            # RR Ratio (если нет в metrics - считаем)
             rr_ratio = metrics.get('rr_ratio', 0)
             if rr_ratio == 0:
                 avg_win = metrics.get('avg_win', 0)
                 avg_loss = metrics.get('avg_loss', 0)
                 rr_ratio = avg_win / abs(avg_loss) if avg_loss != 0 else 0
 
-            # ✅ 5 КРИТЕРИЕВ ДЛЯ LIVE
+            # Recovery Factor
+            rec_factor = metrics.get('recovery_factor', 0)
+
+            # 5 КРИТЕРИЕВ ДЛЯ LIVE
             if (pnl_pct > min_pnl_pct and  # +15%+
                     metrics.get('max_dd_pct', 100) < max_dd and  # DD <15%
                     metrics.get('total_trades', 0) > min_trades and  # >100 сделок
@@ -241,6 +245,7 @@ class BacktestRunner:
                     'rr_ratio': round(rr_ratio, 2),
                     'avg_win': round(metrics.get('avg_win', 0), 2),
                     'avg_loss': round(metrics.get('avg_loss', 0), 2),
+                    'recovery_factor': round(metrics.get('recovery_factor', 0), 2),
                     'rules_count': metrics.get('rules_count', 0),
                     'period': metrics.get('period', '')
                 })
