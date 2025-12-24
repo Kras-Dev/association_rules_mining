@@ -14,90 +14,113 @@ import pandas as pd
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
 from pathlib import Path
-from utils.logger import setup_logger
+
+from utils.base_file_handler import BaseFileHandler
 
 
-class BacktestRunner:
-    """Полный запуск бэктестов + JSON сохранение"""
+class BacktestRunner(BaseFileHandler):
+    """
+    Оркестратор системы тестирования стратегий.
 
-    def __init__(self, max_workers: int = None, verbose: bool = True):
+    Класс управляет полным жизненным циклом бэктеста: от загрузки данных из MT5
+    до параллельного запуска тестов, сохранения архива и синхронизации с live-ботом.
+
+    Attributes:
+        timestamp_dir (Path): Уникальная папка для текущей сессии бэктеста.
+        max_workers (int): Количество используемых ядер процессора.
+        results (List[Tuple]): Хранилище результатов всех завершенных тестов.
+    """
+
+    def __init__(self, max_workers: int = None, verbose: bool = False):
+        """
+        Инициализирует Runner, создает структуру папок и настраивает логи.
+
+        Args:
+            max_workers (int, optional): Лимит ядер. По умолчанию: (все ядра - 2).
+            verbose (bool): Флаг детального логирования в консоль.
+        """
+        # Runner может создавать папку с датой и передавать её в супер-класс
+        self.timestamp_dir = Path("history") / datetime.now().strftime("%d-%m-%Y")
+        super().__init__(verbose, self.timestamp_dir)
         self.max_workers = max_workers or (mp.cpu_count() - 2 or 1)
-        self.verbose = verbose
-        self.results: List[Tuple[str, str, str, Dict[str, Any]]] = []
-        self.exp_dir = self._create_history_dir()
-        self.models_dir = self.exp_dir / "models"
+        self.results: List[Tuple] = []
+        self._prepare_logs()
 
-    def _create_history_dir(self):
-        timestamp = datetime.now().strftime("%d-%m-%Y")
-        exp_dir = Path("history") / timestamp
-        exp_dir.mkdir(parents=True, exist_ok=True)
+    def _prepare_logs(self):
+        """Создает служебную директорию для лог-файлов текущей сессии."""
+        log_dir = self.exp_dir / "logs"
+        log_dir.mkdir(exist_ok=True)
 
-        # ✅ Создаем папки ОДИН РАЗ
-        (exp_dir / "models").mkdir(exist_ok=True)
-        (exp_dir / "results").mkdir(exist_ok=True)
-        log_dir = exp_dir / "logs"  # ✅ Готовый путь
-        log_dir.mkdir(exist_ok=True)  # ✅ Создаем ОДИН РАЗ
+    def update_live_directory(self):
+        """
+        Синхронизирует результаты текущего прогона с рабочей папкой Live-бота.
 
-        setup_logger("MAIN", log_dir)  # ✅ Правильно!
-
-        # ✅ Cross-platform active (try/except для Linux)
+        Метод полностью заменяет содержимое папки 'history/active' данными
+        из текущей сессии (кроме логов), чтобы бот всегда использовал свежие правила.
+        """
         active_dir = Path("history/active")
-        if active_dir.exists():
-            shutil.rmtree(active_dir)
-        active_dir.mkdir(exist_ok=True)
-
-        # ✅ КОПИРУЕМ ТОЛЬКО models/ и results/ (БЕЗ logs/)
-        for item in exp_dir.rglob("*"):
-            if item.is_file() and "logs" not in str(item.relative_to(exp_dir)):
-                rel_path = item.relative_to(exp_dir)
-                dest = active_dir / rel_path
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(item, dest)
-
-        return exp_dir
+        try:
+            # Очистка старой конфигурации лайва
+            if active_dir.exists():
+                shutil.rmtree(active_dir)
+            # Клонирование текущей сессии в active (без логов)
+            shutil.copytree(
+                self.timestamp_dir,
+                active_dir,
+                ignore=shutil.ignore_patterns('logs*')
+            )
+            self._log_info(f"🚀 СИНХРОНИЗАЦИЯ: Папка {self.timestamp_dir} теперь ACTIVE для лайва")
+        except Exception as e:
+            self._log_error(f"❌ Ошибка обновления LIVE папки: {e}")
 
     def backtest_single(self, args: Tuple[str, str, str]) -> Tuple[str, str, str, Dict[str, Any]]:
-        """Один тест """
+        """
+        Выполняет полный цикл теста для одного актива и таймфрейма.
+
+        Процесс: загрузка данных -> генерация фич -> обучение Miner -> тест Backtester.
+
+        Args:
+            args (Tuple): Кортеж (symbol, timeframe, mode).
+
+        Returns:
+            Tuple: Данные об инструменте и словарь с метриками (или ошибкой).
+        """
         symbol, tf, mode = args
-        if self.verbose:
-            print(f"[{mp.current_process().name}] {symbol} {tf}")
+        self._log_info(f"[{mp.current_process().name}] {symbol} {tf}")
 
         try:
             with MT5Client() as client:
+                # --- ПОДГОТОВКА ДАННЫХ ---
                 tf_mt5 = getattr(mt5, f"TIMEFRAME_{tf}")
                 candles_count = get_candles(tf)
                 df_full = client.get_rates(symbol, tf_mt5, candles_count, 1)
 
                 if df_full is None or len(df_full) < 1000:
                     return symbol, tf, mode, {'error': 'Мало данных'}
-
-                # ШАГ 1: Считаем фичи ОДИН раз для всей истории (MA будут корректны)
+                # ШАГ 1: Генерация фич (MA, индикаторы) на всей истории для корректности
                 feat_gen = Features(verbose=False)
                 df_with_all_features = feat_gen.create_all_features(df_full)
-                # ШАГ 2: Сплитуем данные
+                # ШАГ 2: Разделение на обучение (70%) и тест (30%)
                 split_70 = int(len(df_with_all_features) * 0.7)
-
                 # Для Майнера(обучение) отдаем СЫРЫЕ цены (он сам вызовет генерацию фич для train куска)
                 train_df = df_full.iloc[:split_70].copy()
                 # Для Бэктестера отдаем ПРЕДРАССЧИТАННЫЕ фичи (для честных MA)
                 test_df_prices = df_full.iloc[split_70:].copy()
                 test_features = df_with_all_features.iloc[split_70:].copy()
-
-                # 3. Майнер (анализирует train_df)
+                # --- ОБУЧЕНИЕ И ТЕСТ ---
+                # ШАГ 3: Майнер анализирует паттерны на тренировочном куске
                 miner = CandleMiner(min_confidence=0.7, min_support=10, verbose=False, history_dir=self.exp_dir)
                 train_results = miner.smart_analyze(train_df, symbol, tf)
-
-                # ✅ ШАГ 4: Бэктестер (использует test_features с готовыми индикаторами)
+                # ШАГ 4: Бэктестер проверяет паттерны на тестовом (новом) куске
                 bt = Backtester(symbol, verbose=False, history_dir=self.exp_dir)
-                metrics = bt.run_backtest(test_df_prices, test_features, symbol, tf, mode, verbose=False)
+                metrics = bt.run_backtest(test_df_prices, test_features, symbol, tf, mode)
+                # Сбор финальных данных
                 pnl = metrics.get('total_pnl', 0) if 'error' not in metrics else 0
-
-                # ✅ ПЕРИОД + rules_count
                 start_date = test_df_prices.iloc[0]['time'].strftime('%d.%m.%y')
                 end_date = test_df_prices.iloc[-1]['time'].strftime('%d.%m.%y')
 
-                if self.verbose:
-                    print(f"✅ [{mp.current_process().name}] {symbol} {tf} {start_date}-{end_date}: {pnl:.1f}%")
+                msg = f"✅ [{mp.current_process().name}] {symbol} {tf} {start_date}-{end_date}: {pnl:.1f}%"
+                self._log_info(msg)
 
                 metrics.update({
                     'period': f"{start_date}-{end_date}",
@@ -107,20 +130,24 @@ class BacktestRunner:
 
             return symbol, tf, mode, metrics
 
-
         except Exception as e:
             import traceback
             # Печатаем полный стек ошибки, чтобы видеть где именно падает
-            print(f"❌ Ошибка в {symbol} {tf}: {traceback.format_exc()}")
+            self._log_error(f"❌ Ошибка в {symbol} {tf}: {traceback.format_exc()}")
             return symbol, tf, mode, {'error': str(e)}
 
     def run_parallel(self) -> List[Tuple[str, str, str, Dict[str, Any]]]:
-        """🧪 Параллельный запуск всех тестов"""
+        """
+        Запускает пул процессов для выполнения всех запланированных тестов.
+
+        Returns:
+        List: Список кортежей с результатами по каждому инструменту.
+        """
         tasks = [(s, t, "SIGNAL_TO_SIGNAL") for s in TEST_SYMBOLS for t in TEST_TIMEFRAMES]
 
-        print(f"🚀 {len(tasks)} тестов × {self.max_workers} ядер")
+        print(f"{self._get_context()}: {len(tasks)} тестов × {self.max_workers} ядер")
         print("=" * 80)
-
+        # Параллельное выполнение с визуализацией прогресса
         results = process_map(
             self.backtest_single,
             tasks,
@@ -134,7 +161,14 @@ class BacktestRunner:
         return results
 
     def save_results(self):
-        """💾 СОХРАНЕНИЕ JSON + CSV"""
+        """
+        Сохраняет накопленные результаты в форматах JSON и CSV.
+
+        После успешной записи инициирует обновление папки для Live-трейдинга.
+        """
+        if not self.results:
+            self._log_warning("Нет результатов для сохранения")
+            return
         results_db = []
 
         for symbol, tf, mode, metrics in self.results:
@@ -148,19 +182,20 @@ class BacktestRunner:
             }
             results_db.append(result)
 
-        # JSON
-        json_path = self.exp_dir / "results" / "backtest_results.json"
+        # Сохранение в JSON (для парсинга системой)
+        json_path = self.results_dir / "backtest_results.json"
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(results_db, f, indent=2, ensure_ascii=False)
-
-        # CSV
-        csv_path = self.exp_dir / "results" / "backtest_results.csv"
+        # Сохранение в CSV (для анализа в Excel/Pandas)
+        csv_path = self.results_dir / "backtest_results.csv"
         pd.DataFrame(results_db).to_csv(csv_path, index=False, encoding='utf-8')
 
-        print(f"💾 Сохранено в: {self.exp_dir}/results/")
+        print(f"{self._get_context()}: 💾 Сохранено в: {self.exp_dir}/results/")
+        # Финальный шаг: делаем этот прогон актуальным для бота
+        self.update_live_directory()
 
     def print_summary(self):
-        """📊 КРАСИВАЯ ТАБЛИЦА + ТОП-15"""
+        """Выводит в консоль сводную статистику и топ инструментов по доходности."""
         wins = profitable = 0
         total_pnl = 0
         top_results = []
@@ -187,7 +222,7 @@ class BacktestRunner:
             else:
                 print(f"❌ {symbol:10s} {tf:3s}: {metrics['error'][:40]}")
 
-        # 🏆 ТОП-15
+        # Вывод лучших стратегий
         top_results.sort(reverse=True)
         print("\n🏆 ТОП-15:")
         print("-" * 80)
@@ -224,15 +259,27 @@ class BacktestRunner:
                 avg_loss = metrics.get('avg_loss', 0)
                 rr_ratio = avg_win / abs(avg_loss) if avg_loss != 0 else 0
 
-            # Recovery Factor
-            rec_factor = metrics.get('recovery_factor', 0)
+            # 3. Достаем текущие DD и RF
+            current_dd = metrics.get('max_dd_pct', 100)
+            current_rf = metrics.get('recovery_factor', 0)
 
-            # 5 КРИТЕРИЕВ ДЛЯ LIVE
-            if (pnl_pct > min_pnl_pct and  # +15%+
-                    metrics.get('max_dd_pct', 100) < max_dd and  # DD <15%
-                    metrics.get('total_trades', 0) > min_trades and  # >100 сделок
-                    rr_ratio > min_rr and  # RR >1.2
-                    metrics.get('profit_factor', 0) > min_pf):  # PF >1.1
+            # --- ЛОГИКА ДИНАМИЧЕСКОГО RF
+            required_rf = min_rf  # По умолчанию 1.5
+
+            if pnl_pct > 80 and current_dd < 30:
+                required_rf = 3.0
+            elif pnl_pct > 40 and current_dd < 20:
+                required_rf = 2.0
+            elif pnl_pct > 15 and current_dd < 15:
+                required_rf = 1.5
+
+            # ОБЪЕДИНЕННАЯ ПРОВЕРКА ВСЕХ 6 КРИТЕРИЕВ ДЛЯ LIVE ТРЕЙДИНГА
+            if (pnl_pct > min_pnl_pct and  # (1) PnL > 15%
+                    current_dd <= max_dd and  # (2) MaxDD <= 15%
+                    metrics.get('total_trades', 0) > min_trades and  # (3) Trades > 49
+                    rr_ratio > min_rr and  # (4) RR > 1.2
+                    metrics.get('profit_factor', 0) > min_pf and  # (5) PF > 1.1
+                    current_rf >= required_rf):  # (6) Динамический RF ✓
 
                 candidates.append({
                     'symbol': symbol,
@@ -241,19 +288,19 @@ class BacktestRunner:
                     'profit_factor': round(metrics.get('profit_factor', 0), 2),
                     'win_rate_pct': round(metrics.get('win_rate', 0) * 100, 1),
                     'trades': metrics.get('total_trades', 0),
-                    'max_dd_pct': round(metrics.get('max_dd_pct', 0), 1),
+                    'max_dd_pct': round(current_dd, 1),
                     'rr_ratio': round(rr_ratio, 2),
                     'avg_win': round(metrics.get('avg_win', 0), 2),
                     'avg_loss': round(metrics.get('avg_loss', 0), 2),
-                    'recovery_factor': round(metrics.get('recovery_factor', 0), 2),
+                    'recovery_factor': round(current_rf, 2),
                     'rules_count': metrics.get('rules_count', 0),
                     'period': metrics.get('period', '')
                 })
 
-        # ✅ СОРТИРОВКА ПО ДОХОДНОСТИ
+        # СОРТИРОВКА ПО ДОХОДНОСТИ
         candidates.sort(key=lambda x: x['pnl_pct'], reverse=True)
 
-        # 🎯 КРАСИВЫЙ ВЫВОД
+        # КРАСИВЫЙ ВЫВОД
         print(f"\n🎯 LIVE КАНДИДАТЫ ({len(candidates)}):")
         print("-" * 90)
         print(f"{'#':<2} {'Символ':<10} {'TF':<4} {'PnL%':<6} {'PF':<5} {'RR':<5} {'DD%':<5} {'Сделок':<6} {'Правила'}")
@@ -267,13 +314,10 @@ class BacktestRunner:
 
         print("-" * 90)
 
-        # 📊 СТАТИСТИКА
+        # СТАТИСТИКА
         if candidates:
             top_pnl = max(c['pnl_pct'] for c in candidates)
             avg_pf = sum(c['profit_factor'] for c in candidates) / len(candidates)
             print(f"🏆 ЛИДЕР: +{top_pnl:.1f}% | Ср. PF: {avg_pf:.2f}")
 
         return candidates
-
-
-

@@ -1,19 +1,22 @@
-import logging
 from typing import Optional, Any
 
 import MetaTrader5 as mt5
 import pandas as pd
+
+from utils.base_logger import BaseLogger
 from utils.config_manager import load_config
 
-logger = logging.getLogger(__name__)
 
-class MT5Client:
+
+class MT5Client(BaseLogger):
     """Клиент для MT5 с методами загрузки данных."""
 
-    def __init__(self):
+    def __init__(self, verbose=False):
+
+        super().__init__(verbose=verbose)
         self.config = load_config()
         if self.config is None:
-            raise FileNotFoundError(logger.error("[MT5Client]:❌ config.yaml не найден!"))
+            raise FileNotFoundError(self._log_error(" ❌ config.yaml не найден!"))
 
         self.login = self.config.get('login')
         self.password = self.config.get('password')
@@ -22,7 +25,7 @@ class MT5Client:
         self.account_info = None
 
         if not mt5.initialize():
-            raise ConnectionError(logger.error(f"❌ MT5 initialize failed: {mt5.last_error()}"))
+            raise ConnectionError(self._log_error(f"❌ MT5 initialize failed: {mt5.last_error()}"))
 
     def connect(self) -> bool:
         if self.connected:
@@ -34,30 +37,30 @@ class MT5Client:
             self.connected = True  # демо-доступ
 
         if not self.connected:
-            logger.error(f"[MT5Client]:❌ Ошибка: {mt5.last_error()}")
+            self._log_error(f"❌ Ошибка: {mt5.last_error()}")
             mt5.shutdown()
             return False
 
         self.account_info = mt5.account_info()
-        logger.info("[MT5Client]:✅ MT5 подключён")
+        self._log_info("✅ MT5 подключён")
         return True
 
     def disconnect(self):
         if self.connected:
             mt5.shutdown()
             self.connected = False
-            logger.info("[MT5Client]: MT5 отключён")
+            self._log_info("MT5 отключён")
 
     def get_rates(self, symbol: str, timeframe: int, count: int = 100,
                   start_pos: int = 1) -> Optional[pd.DataFrame]:
         """OHLCV данные."""
         if not mt5.symbol_select(symbol, True):
-            logger.error(f"[MT5Data]: ❌ Символ {symbol} не выбран")
+            self._log_error(f"❌ Символ {symbol} не выбран")
             return None
 
         rates = mt5.copy_rates_from_pos(symbol, timeframe, start_pos, count)
         if rates is None or len(rates) == 0:
-            logger.error(f"[MT5Data]: ❌ Нет данных {symbol}: {mt5.last_error()}")
+            self._log_error(f"❌ Нет данных {symbol}: {mt5.last_error()}")
             return None
 
         df = pd.DataFrame(rates)
@@ -78,10 +81,10 @@ class MT5Client:
 
         trade_allowed = terminal_info.trade_allowed
         if not trade_allowed:
-            logger.error("[MT5Client]: ❌ AutoTrading ОТКЛЮЧЁН! Включи зелёную кнопку!")
+            self._log_error("❌ AutoTrading ОТКЛЮЧЁН! Включи зелёную кнопку!")
             return False
 
-        logger.info("[MT5Client]: ✅ AutoTrading ВКЛЮЧЁН")
+        self._log_info("✅ AutoTrading ВКЛЮЧЁН")
         return True
 
     def send_order(self, symbol: str, action: int, volume: float, price: float,
@@ -91,18 +94,18 @@ class MT5Client:
             return {'success': False, 'error': 'AutoTrading OFF'}
 
         if not mt5.symbol_select(symbol, True):
-            logger.error(f"[MT5Client]: ❌ Символ {symbol} не выбран")
+            self._log_error(f"❌ Символ {symbol} не выбран")
             return {'success': False, 'error': 'Symbol not selected'}
 
         symbol_info = mt5.symbol_info(symbol)
         if symbol_info is None:
-            logger.error(f"[MT5Client]: ❌ Нет info {symbol}")
+            self._log_error(f"❌ Нет info {symbol}")
             return {'success': False, 'error': 'No symbol info'}
 
         point = symbol_info.point
         broker_min_stop = symbol_info.trade_stops_level * point
 
-        # 🔥 УНИВЕРСАЛЬНЫЙ МИНИМУМ по типу символа
+        # УНИВЕРСАЛЬНЫЙ МИНИМУМ по типу символа
         if symbol.startswith('#'):  # Акции
             MIN_STOP_PIPS, MIN_TP_PIPS = 50, 75
         else:  # Forex
@@ -111,7 +114,7 @@ class MT5Client:
         SAFE_STOP = max(broker_min_stop * 2, MIN_STOP_PIPS * point)
         SAFE_TP = max(broker_min_stop * 3, MIN_TP_PIPS * point)
 
-        # 🔥 КОРРЕКЦИЯ SL/TP
+        # КОРРЕКЦИЯ SL/TP
         is_buy = action == mt5.ORDER_TYPE_BUY
         if is_buy:  # BUY
             if sl > 0:
@@ -128,7 +131,7 @@ class MT5Client:
                 tp_distance = max(SAFE_TP, abs(tp - price))
                 tp = price - tp_distance
 
-        logger.info(f"[MT5Client]: {symbol} broker={broker_min_stop:.5f} safeSL={SAFE_STOP:.5f}")
+        self._log_info(f"{symbol} broker={broker_min_stop:.5f} safeSL={SAFE_STOP:.5f}")
 
         # НОРМАЛИЗАЦИЯ
         order_type = action
@@ -136,7 +139,7 @@ class MT5Client:
         sl = self._normalize_price(symbol, sl) if sl > 0 else 0
         tp = self._normalize_price(symbol, tp) if tp > 0 else 0
 
-        logger.info(f"[MT5Client]: {symbol} {'BUY' if is_buy else 'SELL'} {volume:.2f}л | P:{price:.5f} S:{sl:.5f} T:{tp:.5f}")
+        self._log_info(f"{symbol} {'BUY' if is_buy else 'SELL'} {volume:.2f}л | P:{price:.5f} S:{sl:.5f} T:{tp:.5f}")
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -155,10 +158,10 @@ class MT5Client:
 
         result = mt5.order_send(request)
         if result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error(f"[MT5Client]: ❌ {symbol} {result.retcode} '{result.comment}'")
+            self._log_error(f"❌ {symbol} {result.retcode} '{result.comment}'")
             return {'success': False, 'retcode': result.retcode, 'comment': result.comment}
 
-        logger.info(f"[MT5Client]: ✅ {symbol} {volume:.2f}л | {price:.5f} | SL:{sl:.5f} | ID:{result.order}")
+        self._log_info(f"✅ {symbol} {volume:.2f}л | {price:.5f} | SL:{sl:.5f} | ID:{result.order}")
         return {
             'success': True,
             'order': result.order,
@@ -171,7 +174,7 @@ class MT5Client:
         """🔒 Закрытие позиции по тикету"""
         positions = mt5.positions_get(ticket=position_ticket)
         if not positions:
-            logger.warning(f"[MT5Client]: ❌ Позиция {position_ticket} не найдена")
+            self._log_warning(f"❌ Позиция {position_ticket} не найдена")
             return {'success': False, 'error': 'Position not found'}
 
         pos = positions[0]
@@ -197,10 +200,10 @@ class MT5Client:
 
         result = mt5.order_send(request)
         if result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info(f"[MT5Client]: ✅ Закрыта {symbol} #{position_ticket}")
+            self._log_info(f"✅ Закрыта {symbol} #{position_ticket}")
             return {'success': True, 'order': result.order}
         else:
-            logger.error(f"[MT5Client]: ❌ Закрытие {symbol}: {result.retcode}")
+            self._log_error(f"❌ Закрытие {symbol}: {result.retcode}")
             return {'success': False, 'retcode': result.retcode, 'comment': result.comment}
 
     def _normalize_price(self, symbol: str, price: float) -> float:
