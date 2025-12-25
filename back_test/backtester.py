@@ -45,6 +45,7 @@ class Backtester(BaseFileHandler):
         self.symbol = symbol
         self.timeframe = None
         self.total_sl_hits = 0
+        self.equity_history = []
 
     def load_rules(self, symbol: str, timeframe: str) -> pd.DataFrame:
         """
@@ -175,7 +176,8 @@ class Backtester(BaseFileHandler):
         period = f"[{start_date} → {end_date}]"
         # Расчет и вывод метрик
         calculator = MetricsCalculator(verbose=self.verbose)
-        metrics = calculator.calculate(self.trades, INITIAL_CAPITAL, rules_count, sl_hits=self.total_sl_hits,)
+        metrics = calculator.calculate(self.trades, INITIAL_CAPITAL, rules_count,
+                                       sl_hits=self.total_sl_hits, equity_history=self.equity_history)
         calculator.print_metrics(metrics, symbol, timeframe, exit_mode, period, rules_count)
         return metrics
 
@@ -202,6 +204,11 @@ class Backtester(BaseFileHandler):
             else:
                 # 2. Если не вышли, тогда возможен пирамидинг
                 self._check_pyramid(active_rules, row['close'])
+                # После обработки бара, сохраняем текущий баланс + плавающий PnL
+
+        current_unrealized_pnl = self.pos_manager.calculate_unrealized_pnl(self.position, row['close'])
+        current_equity = self.capital + current_unrealized_pnl
+        self.equity_history.append(current_equity)
 
     def _get_sl_multiplier(self) -> float:
         """Определяет множитель стоп-лосса в зависимости от типа инструмента."""
@@ -367,3 +374,4 @@ class Backtester(BaseFileHandler):
         self.trades = []
         self.position = None
         self.total_sl_hits = 0
+        self.equity_history = []

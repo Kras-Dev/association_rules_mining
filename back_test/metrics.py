@@ -25,7 +25,7 @@ class MetricsCalculator(BaseLogger):
 
 
     def calculate(self, trades: List[Trade], initial_capital: float,
-                  rules_count: int = 0,  sl_hits: int = 0) -> Dict:
+                  rules_count: int = 0,  sl_hits: int = 0, equity_history: List[float]=None) -> Dict:
         """
         Рассчитывает основные показатели эффективности стратегии.
 
@@ -33,60 +33,77 @@ class MetricsCalculator(BaseLogger):
             trades (List[Trade]): Список объектов завершенных сделок.
             initial_capital (float): Стартовый капитал.
             rules_count (int): Количество правил, участвовавших в генерации сигналов.
+            sl_hits (int):
+            equity_history (List[float]):
 
         Returns:
             Dict: Словарь со всеми рассчитанными метриками.
         """
-        # --- Базовая проверка на наличие данных ---
+        # --- Базовая проверка ---
         if not trades:
             return {'error': 'Нет сделок', 'total_trades': 0, 'final_capital': initial_capital}
-        # --- Подготовка данных. ---
-        # Превращаем список объектов сделок в таблицу для быстрых расчетов
+
+        # Превращаем сделки в DataFrame для расчетов
         trades_df = pd.DataFrame([t.__dict__ for t in trades])
         wins = trades_df[trades_df['pnl'] > 0]
         losses = trades_df[trades_df['pnl'] < 0]
 
-        # --- Расчет кривой эквити и просадок ---
-        # Equity curve начинается со стартового капитала
-        equity = np.cumsum([initial_capital] + [t.pnl for t in trades])
-        peak = np.maximum.accumulate(equity)
+        # 1. РАСЧЕТ ПРОСАДОК (DRAWDOWN)
+        # Floating DD: на основе поминутной/побарной истории эквити (самая точная)
+        max_floating_dd = self._calculate_max_drawdown(equity_history) if equity_history else 0.0
 
-        # Просадка в процентах от пика
-        drawdown = (equity - peak) / peak * 100
+        # Equity DD: только по точкам закрытия сделок (традиционная)
+        equity_curve_closed = np.cumsum([initial_capital] + [t.pnl for t in trades])
+        max_equity_dd = self._calculate_max_drawdown(equity_curve_closed.tolist())
 
-        # --- Расчет средних показателей и соотношений ---
+        # 2. РАСЧЕТ ФИНАНСОВЫХ ПОКАЗАТЕЛЕЙ
+        total_pnl = trades_df['pnl'].sum()
+        final_capital = equity_curve_closed[-1]
+        pnl_pct = ((final_capital / initial_capital - 1) * 100)
+
         avg_win = wins['pnl'].mean() if len(wins) > 0 else 0
         avg_loss = losses['pnl'].mean() if len(losses) > 0 else 0
-
-        # Соотношение риск/прибыль (Risk/Reward)
         rr_ratio = avg_win / abs(avg_loss) if avg_loss != 0 else 0
 
-        # Общий финансовый результат
-        # PnL% (profit and loss)
-        pnl_pct = ((equity[-1] / initial_capital - 1) * 100)
-        total_pnl = trades_df['pnl'].sum()
-
-        # Максимальная просадка в денежном выражении (для Recovery Factor)
-        max_dd_money = (peak - equity).max()
+        # 3. RECOVERY FACTOR (используем денежную просадку из Floating истории)
+        # Берем историю эквити (если есть) или кривую по закрытым
+        ref_equity = np.array(equity_history) if equity_history else equity_curve_closed
+        max_dd_money = (np.maximum.accumulate(ref_equity) - ref_equity).max()
         recovery_factor = total_pnl / max_dd_money if max_dd_money > 0 else 0
-        # --- Сборка итогового словаря метрик ---
+
         return {
             'total_trades': len(trades_df),
             'win_rate': len(wins) / len(trades_df) if len(trades_df) > 0 else 0,
             'profit_factor': wins['pnl'].sum() / abs(losses['pnl'].sum()) if len(losses) > 0 else float('inf'),
-            'total_pnl': trades_df['pnl'].sum(),
+            'total_pnl': round(total_pnl, 2),
             'total_pnl_pct': round(pnl_pct, 2),
-            'final_capital': equity[-1],
-            'max_dd_pct': abs(drawdown.min()) if len(drawdown) > 0 else 0,
+            'final_capital': round(final_capital, 2),
+            'max_floating_dd': round(max_floating_dd, 2),
+            'max_equity_dd': round(max_equity_dd, 2),
             'avg_win': round(avg_win, 2),
             'avg_loss': round(avg_loss, 2),
             'rr_ratio': round(rr_ratio, 2),
-            'best_trade': trades_df['pnl'].max() if len(trades_df) > 0 else 0,
-            'worst_trade': trades_df['pnl'].min() if len(trades_df) > 0 else 0,
+            'best_trade': round(trades_df['pnl'].max(), 2),
+            'worst_trade': round(trades_df['pnl'].min(), 2),
             'rules_count': rules_count,
             'recovery_factor': round(recovery_factor, 2),
             'sl_hits': sl_hits,
         }
+
+    def _calculate_max_drawdown(self, equity_curve: List[float]) -> float:
+        """Вспомогательная функция для расчета максимальной просадки."""
+        if not equity_curve:
+            return 0.0
+
+        peak = equity_curve[0]
+        max_dd = 0.0
+        for value in equity_curve:
+            if value > peak:
+                peak = value
+            drawdown = (peak - value) / peak if peak != 0 else 0.0
+            if drawdown > max_dd:
+                max_dd = drawdown
+        return max_dd * 100.0  # В процентах
 
     def print_metrics(self, metrics: Dict, symbol: str, tf: str, mode: str, period: str="", rules_count: int = 0):
         """
@@ -124,20 +141,31 @@ class MetricsCalculator(BaseLogger):
         period_str = f" | {period}" if period.strip() else ""
 
         print(f"\n📊 {symbol} {tf} | {mode}{period_str} | правил: {rules}")
-        print("-" * 60)
-        # 💰 Final Capital: итоговый капитал (абсолют $) + % прироста от стартового
-        print(f"💰 Final Capital:   ${metrics['final_capital']:.2f} ({metrics['total_pnl_pct']:.1f}%)")
-        # 📈 Profit Factor: сумма профитов/сумма лоссов | RR: средний профит/средний лосс
-        print(f"📈 Profit Factor:   {metrics['profit_factor']:.2f} | RR: {metrics['rr_ratio']:.2f}")
-        # 🎯 Win Rate: % прибыльных сделок (кол-во всех сделок)
-        print(f"🎯 Win Rate:        {metrics['win_rate'] * 100:.1f}% ({metrics['total_trades']} сделок)")
-        # 📉 Max DD: максимальная просадка капитала (% от пика)
-        print(f"📉 Max DD:          {metrics['max_dd_pct']:.1f}%")
-        # ⭐ Best: самая прибыльная сделка ($) | 💥 Worst: самая убыточная сделка ($)
-        print(f"⭐ Best:            ${metrics['best_trade']:.2f}")
-        print(f"💥 Worst:           ${metrics['worst_trade']:.2f}")
-        # 🛡️ Коэффициент восстановления (RF)
-        print(f"🛡️ Recovery Factor: {metrics['recovery_factor']:.2f}")
-        # 📊 Avg Win/Loss: средний профит выигрышей / средний лосс проигрышей
-        print(f"📊 Avg Win/Loss:    ${metrics['avg_win']:.2f} / ${metrics['avg_loss']:.2f}")
-        print(f" sl_hits:            {metrics['sl_hits']}")
+        print("-" * 80)
+
+        # Основные финансовые показатели
+        print(
+            f"💰 Final Capital:   ${metrics['final_capital']} ({metrics['total_pnl_pct']}%) — Итоговый капитал и чистая прибыль в %")
+        print(
+            f"📈 Profit Factor:   {metrics['profit_factor']:.2f} — Отношение общей прибыли к общему убытку (лучше > 1.5)")
+        print(f"⚖️ RR Ratio:        {metrics['rr_ratio']} — Соотношение средний плюс / средний минус")
+        print(
+            f"🎯 Win Rate:        {metrics['win_rate']:.1%} (Всего сделок: {metrics['total_trades']}) — Процент прибыльных сделок")
+
+        # Риски и просадки
+        print(f"📉 Floating DD:     {metrics['max_floating_dd']}% — Худшая точка (плавающая просадка) за всю историю")
+        print(f"📊 Equity DD:       {metrics['max_equity_dd']}% — Макс. просадка только по зафиксированным сделкам")
+
+        # Сравнение сделок
+        print(f"⭐ Best Trade:      ${metrics['best_trade']} — Самая прибыльная сделка")
+        print(f"💥 Worst Trade:     ${metrics['worst_trade']} — Самая убыточная сделка")
+
+        # Эффективность восстановления
+        print(
+            f"🛡️ Recovery Factor: {metrics['recovery_factor']} — Способность системы восстанавливаться после просадок (лучше > 1.0)")
+        print(
+            f"💵 Avg Win/Loss:    ${metrics['avg_win']} / ${metrics['avg_loss']} — Средний профит и средний лосс на сделку, {abs(metrics['avg_win']/metrics['avg_loss']):.2f}")
+
+        # Статистика стопов
+        print(f"🛑 SL Hits:         {metrics['sl_hits']} — Количество закрытий по Stop Loss")
+        print("-" * 80)

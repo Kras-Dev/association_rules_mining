@@ -153,3 +153,13 @@ class PositionManager(BaseLogger):
         if position['type'] == 'LONG':
             return current_price <= position['sl']
         return current_price >= position['sl']
+
+    def calculate_unrealized_pnl(self, position: Dict, current_price: float) -> float:
+        """Рассчитывает нереализованный PnL (плавающий PnL) открытой позиции."""
+        if not position:
+            return 0.0
+
+        if position['type'] == 'LONG':
+            return (current_price - position['entry']) * position['size']
+        # Для Short:
+        return (position['entry'] - current_price) * position['size']
