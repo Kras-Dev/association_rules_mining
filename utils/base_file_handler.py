@@ -1,4 +1,5 @@
 import pickle
+
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -23,11 +24,11 @@ class BaseFileHandler(BaseLogger):
     def _get_cache_path(self, symbol: str, tf: str) -> Path:
         return self.models_dir / f"rules_{symbol}_{tf}.pkl"
 
-    def _save_pickle(self, path: Path, data: Dict):
+    def _save_cache(self, path: Path, data: Dict):
         with open(path, 'wb') as f:
             pickle.dump(data, f)
 
-    def _load_pickle(self, path: Path) -> Optional[Dict]:
+    def _load_cache(self, path: Path) -> Optional[Dict]:
         if path.exists():
             with open(path, 'rb') as f:
                 return pickle.load(f)

@@ -125,39 +125,51 @@ class Features(BaseLogger):
         o, h, l, c = df['open'], df['high'], df['low'], df['close']
         o1, h1, l1, c1 = o.shift(1), h.shift(1), l.shift(1), c.shift(1)
 
-        # Вычисляем суммы для фильтрации base_patterns (float совместимость)
+        # 1. Фильтрация качественных базовых паттернов
         binary_cols = [col for col in features.columns if features[col].nunique() <= 2]
         sums = features[binary_cols].sum()
+        total_rows = len(features)
+
         base_patterns = [col for col in binary_cols if
-                         not col.startswith('vol_') and col not in ['next_up', 'next_down'] and sums[col] > 10]
+                         not col.startswith('vol_') and
+                         col not in ['next_up', 'next_down'] and
+                         20 < sums[col] < (total_rows * 0.85)]
 
-        vol_patterns = [col for col in binary_cols
-                        if col.startswith('vol_') and sums[col] > 10]
+        vol_patterns = [col for col in binary_cols if col.startswith('vol_') and sums[col] > 15]
 
-        sequence_columns = []
-        seq_limit, count = 10000, 0
+        self._log_info(f"🔄 Генерируем {len(base_patterns)}^2 = {len(base_patterns) ** 2} последовательностей...")
+
+        # Словарь для быстрой сборки новых колонок
+        new_cols_dict = {}
+
+        # 2. Динамические последовательности (Candle + Candle)
         for p1 in base_patterns:
-            if count >= seq_limit: break
+            p1_shifted = features[p1].shift(1).fillna(0)
             for p2 in base_patterns:
-                if count >= seq_limit: break
-                seq_col = (features[p1].shift(1).fillna(0) * features[p2]).rename(f'{p1}_prev_{p2}')
-                sequence_columns.append(seq_col)
-                count += 1
+                new_cols_dict[f'{p1}_prev_{p2}'] = p1_shifted * features[p2]
 
-        self._log_debug(f"🔄 Генерируем {len(base_patterns)}^2 = {len(base_patterns) ** 2} последовательностей...")
-
+        # 3. Объемные последовательности (ВЫНЕСЕНО ИЗ ВНУТРЕННЕГО ЦИКЛА)
         for candle in base_patterns:
+            candle_shifted = features[candle].shift(1).fillna(0)
             for vol in vol_patterns:
+                vol_shifted = features[vol].shift(1).fillna(0)
                 # Текущая свеча + предыдущий volume
-                seq1 = (features[candle] * features[vol].shift(1)).astype(float)
-                sequence_columns.append(seq1.rename(f'{candle}_prev_{vol}'))
-
+                new_cols_dict[f'{candle}_prev_{vol}'] = features[candle] * vol_shifted
                 # Предыдущая свеча + текущий volume
-                seq2 = (features[candle].shift(1) * features[vol]).astype(float)
-                sequence_columns.append(seq2.rename(f'{vol}_curr_{candle}'))
+                new_cols_dict[f'{vol}_curr_{candle}'] = vol_shifted * features[candle]
 
-        # CLASSIC PATTERNS
-        sequence_columns.extend([
+        # Создаем DataFrame из словаря
+        seq_df = pd.DataFrame(new_cols_dict, index=features.index)
+
+        # 4. УМНЫЙ ОТСЕВ: Удаляем последовательности, которые встречаются слишком редко (меньше 10 раз)
+        # Это не даст им пройти порог Confidence > 70% и сэкономит память
+        seq_sums = seq_df.sum()
+        valid_cols = seq_sums[seq_sums >= 10].index
+        seq_df = seq_df[valid_cols]
+        self._log_info(f"✅ После фильтрации по Support осталось {len(seq_df.columns)} последовательностей")
+
+        # 5. CLASSIC PATTERNS (Сборка в список)
+        classic_columns = [
             ((l < l1) & (features['vol_spike'] == 1) & (c > l * 1.002)).astype(float).rename('exhaustion_min'),
             ((h > h1) & (features['vol_spike'] == 1) & (c < h * 0.998)).astype(float).rename('exhaustion_max'),
             ((c1 < o1) & (c > o) & (o < c1) & (c > o1)).astype(float).rename('bullish_engulfing'),
@@ -168,16 +180,24 @@ class Features(BaseLogger):
             (l > l1).astype(float).rename('higher_low'),
             (h < h1).astype(float).rename('lower_high'),
             (l < l1).astype(float).rename('lower_low')
-        ])
+        ]
 
-        # EQUAL EXTREMES
-        equal_extremes = self.add_equal_extremes(features, df)
-        sequence_columns.extend([equal_extremes[col] for col in equal_extremes.columns])
+        # 6. EQUAL EXTREMES
+        eq_df = self.add_equal_extremes(features, df)
 
-        result = pd.concat([seq_features, pd.concat(sequence_columns, axis=1)], axis=1)
+        # ФИНАЛЬНАЯ КОНКАТЕНАЦИЯ
+        # Собираем всё: базовые + отфильтрованные секвенции + классика + экстремумы
+        result = pd.concat([
+            seq_features,
+            seq_df,
+            pd.concat(classic_columns, axis=1),
+            eq_df
+        ], axis=1)
+
+        # Удаляем дубликаты (на всякий случай)
         result = result.loc[:, ~result.columns.duplicated(keep='last')]
 
-        self._log_debug(f"Последовательности: {len(result)}")
+        self._log_debug(f"Последовательности: {len(result.columns)} колонок")
         return result
 
     def add_equal_extremes(self, features: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:

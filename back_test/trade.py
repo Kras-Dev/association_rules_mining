@@ -70,12 +70,17 @@ class PositionManager(BaseLogger):
             Dict: Словарь, представляющий открытую позицию.
         """
         # --- Расчет Stop Loss ---
-        sl_distance = atr * sl_mult
-        max_sl_pct = entry_price * SL_CAP_PCT  # Максимум 1.5% от цены
-        # Выбираем МЕНЬШУЮ из дистанций, чтобы не превысить лимит в 1.5%
-        final_sl_distance = min(sl_distance, max_sl_pct)
-        stop_loss_level = entry_price - final_sl_distance
-        self._log_info(f"OPEN LONG: {entry_price:.2f}, SL: {stop_loss_level:.2f}")
+        stop_loss_level = None
+        # Если sl_mult > 0, считаем стоп. Если <= 0, стопа нет.
+        if sl_mult > 0:
+            sl_distance = atr * sl_mult
+            max_sl_pct = entry_price * SL_CAP_PCT
+            final_sl_distance = min(sl_distance, max_sl_pct)
+            stop_loss_level = entry_price - final_sl_distance
+            self._log_info(f"OPEN LONG: {entry_price:.2f}, SL: {stop_loss_level:.2f}")
+        else:
+            self._log_info(f"OPEN LONG: {entry_price:.2f}, NO SL (Logic disabled)")
+
         return {
             'type': 'LONG', 'entry': entry_price, 'sl': stop_loss_level,
             'size': size, 'pyramid_level': 1, 'entry_time': entry_time,
@@ -89,12 +94,17 @@ class PositionManager(BaseLogger):
         Открытие короткой позиции (Short). Аналогично Long, но в обратную сторону.
         """
         # --- Расчет Stop Loss ---
-        sl_distance = atr * sl_mult
-        max_sl_pct = entry_price * SL_CAP_PCT
-        # Выбираем МЕНЬШУЮ из дистанций
-        final_sl_distance = min(sl_distance, max_sl_pct)
-        stop_loss_level = entry_price + final_sl_distance
-        self._log_info(f"OPEN SHORT: {entry_price:.2f}, SL: {stop_loss_level:.2f}")
+        stop_loss_level = None
+        # Если sl_mult > 0, считаем стоп. Если <= 0, стопа нет.
+        if sl_mult > 0:
+            sl_distance = atr * sl_mult
+            max_sl_pct = entry_price * SL_CAP_PCT
+            # Выбираем МЕНЬШУЮ из дистанций
+            final_sl_distance = min(sl_distance, max_sl_pct)
+            stop_loss_level = entry_price + final_sl_distance
+            self._log_info(f"OPEN SHORT: {entry_price:.2f}, SL: {stop_loss_level:.2f}")
+        else:
+            self._log_info(f"OPEN SHORT: {entry_price:.2f}, NO SL (Logic disabled)")
         return {
             'type': 'SHORT', 'entry': entry_price, 'sl': stop_loss_level,
             'size': size, 'pyramid_level': 1, 'entry_time': entry_time,

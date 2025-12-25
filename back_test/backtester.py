@@ -57,7 +57,7 @@ class Backtester(BaseFileHandler):
         Returns:
             pd.DataFrame: Отфильтрованные правила, готовые к использованию.
         """
-        cache_file = self._load_pickle(self._get_cache_path(symbol, timeframe))
+        cache_file = self._load_cache(self._get_cache_path(symbol, timeframe))
         # --- Обработка ошибок загрузки кэша ---
         if not cache_file:
             self._log_error(f"❌ Нет файла кэша правил для {symbol} {timeframe}")
@@ -83,13 +83,22 @@ class Backtester(BaseFileHandler):
             pd.DataFrame: Сработавшие правила.
         """
         matched_rules = []
+        # Получаем только те признаки, которые РЕАЛЬНО равны 1 на этом баре
+        active_features_on_bar = set(features_row[features_row == 1].index)
+
         for idx, rule in self.rules.iterrows():
             rule_name = rule['rule_name']
-            # Проверяем, что признаки из имени правила присутствуют в текущем баре
-            matched_features = [word for word in rule_name.split('_')
-                                if word != 'prev' and features_row.get(word, 0) == 1]
-            if len(matched_features) >= 2:
+
+            # Разбиваем имя правила на части и убираем связки 'prev' и 'curr'
+            # Также убираем пустые строки, если они возникнут
+            parts = [word for word in rule_name.split('_')
+                     if word not in ('prev', 'curr', '')]
+
+            # Проверяем, что ВСЕ части правила (признаки) есть в активных на текущем баре
+            # Используем set.issubset для мгновенной проверки
+            if set(parts).issubset(active_features_on_bar):
                 matched_rules.append(rule.to_dict())
+
         return pd.DataFrame(matched_rules) if matched_rules else pd.DataFrame()
 
     def run_backtest(self, df: pd.DataFrame, features: pd.DataFrame, symbol: str,
@@ -139,7 +148,7 @@ class Backtester(BaseFileHandler):
                 signal_count += 1
 
         if signal_count == 0:
-            self._log_warning("⚠️ Нет сигналов для теста, тест пропущен.")
+            self._log_warning(f"⚠️ Нет сигналов для теста {symbol} {timeframe}, тест пропущен.")
             return {'error': 'Нет сигналов'}
 
         # --- Основной цикл симуляции ---
@@ -186,11 +195,12 @@ class Backtester(BaseFileHandler):
             self._check_entry(row, active_rules, atr, idx)
         # --- Управление открытой позицией ---
         else:
-            # Pyramid
-            self._check_pyramid(active_rules, row['close'])
-            # Выход
+            # 1. Сначала проверяем выход
             if self._check_exit(row, features_row, active_rules, atr, idx):
                 self._close_position(row, idx)
+            else:
+                # 2. Если не вышли, тогда возможен пирамидинг
+                self._check_pyramid(active_rules, row['close'])
 
     def _get_sl_multiplier(self) -> float:
         """Определяет множитель стоп-лосса в зависимости от типа инструмента."""
@@ -214,7 +224,9 @@ class Backtester(BaseFileHandler):
 
         sl_mult = self._get_sl_multiplier()
         risk_amount = self.capital * RISK_PER_TRADE
-        size = risk_amount / (atr * SL_ATR_MULTIPLIER * sl_mult)
+        sl_mult_effective = sl_mult if sl_mult > 0 else 1.0
+        denom = (atr * SL_ATR_MULTIPLIER * sl_mult_effective)
+        size = risk_amount / denom if denom != 0 else 0
         # --- Вход в Long/Short по правилу с максимальным 'lift' (силой) ---
         if len(buy_rules) > 0:
             rule = buy_rules.loc[buy_rules['lift'].idxmax()]
@@ -245,26 +257,27 @@ class Backtester(BaseFileHandler):
 
         Обрабатывает Stop Loss, Take Profit и выходы по противоположному сигналу.
         """
-
-        # --- Всегда проверяем Stop Loss (по теням свечи) для всех режимов---
-        if self.position['type'] == 'LONG':
-            # Обработка гэпа: если Open уже ниже SL, закрываем по Open
-            if row['open'] <= self.position['sl']:
-                self.position['exit_price_override'] = row['open']
-                return True
-            # Касание SL внутри бара: закрываем по цене SL
-            if row['low'] <= self.position['sl']:
-                self.position['exit_price_override'] = self.position['sl']
-                return True
-        else:  # SHORT
-            # Обработка гэпа: если Open уже выше SL, закрываем по Open
-            if row['open'] >= self.position['sl']:
-                self.position['exit_price_override'] = row['open']
-                return True
-            # Касание SL внутри бара: закрываем по цене SL
-            if row['high'] >= self.position['sl']:
-                self.position['exit_price_override'] = self.position['sl']
-                return True
+        # Если стопа нет, пропускаем блок проверок SL по теням
+        if self.position['sl'] is not None:
+            # --- Всегда проверяем Stop Loss (по теням свечи) для всех режимов---
+            if self.position['type'] == 'LONG':
+                # Обработка гэпа: если Open уже ниже SL, закрываем по Open
+                if row['open'] <= self.position['sl']:
+                    self.position['exit_price_override'] = row['open']
+                    return True
+                # Касание SL внутри бара: закрываем по цене SL
+                if row['low'] <= self.position['sl']:
+                    self.position['exit_price_override'] = self.position['sl']
+                    return True
+            else:  # SHORT
+                # Обработка гэпа: если Open уже выше SL, закрываем по Open
+                if row['open'] >= self.position['sl']:
+                    self.position['exit_price_override'] = row['open']
+                    return True
+                # Касание SL внутри бара: закрываем по цене SL
+                if row['high'] >= self.position['sl']:
+                    self.position['exit_price_override'] = self.position['sl']
+                    return True
 
         if active_rules.empty or 'direction' not in active_rules.columns:
             # Если нет правил выхода - проверяем только TP/ONE_CANDLE
@@ -309,14 +322,12 @@ class Backtester(BaseFileHandler):
         has_override = 'exit_price_override' in self.position
         # 2. Извлекаем цену (теперь ключ удалится из self.position)
         final_exit_price = self.position.pop('exit_price_override', row['close'])
-        if has_override:
+        if has_override and self.position['sl'] is not None:
             is_sl = False
             if self.position['type'] == 'LONG':
-                # Для LONG стоп всегда ниже или равен цене выхода (с учетом проскальзывания/гэпа)
                 is_sl = (final_exit_price <= self.position['sl'] + 1e-9)
-            else:  # SHORT
+            else:
                 is_sl = (final_exit_price >= self.position['sl'] - 1e-9)
-
             if is_sl:
                 self.total_sl_hits += 1
 

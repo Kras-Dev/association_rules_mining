@@ -54,7 +54,7 @@ class CandleMiner(BaseFileHandler):
             'timestamp': pd.Timestamp.now(),
             'total_features': len(results['all_features'].columns)
         }
-        self._save_pickle(cache_file, cache)
+        self._save_cache(cache_file, cache)
         self._log_info(f"[CandleMiner]: 💾 Сохранено: {cache_file} ({rules_count}/{len(results['all_rules'])} "
                        f">{min_confidence:.0%} conf правил)")
         return str(cache_file)
@@ -64,7 +64,7 @@ class CandleMiner(BaseFileHandler):
         Загрузка предобученных правил из кэша.
         """
         cache_path = self._get_cache_path(symbol, tf)
-        data = self._load_pickle(cache_path)
+        data = self._load_cache(cache_path)
         if data:
             self._log_info(f"📂 Загружено: {cache_path} ({len(data['top_rules'])} правил)")
             return data
