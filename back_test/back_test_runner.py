@@ -73,7 +73,7 @@ class BacktestRunner(BaseFileHandler):
         except Exception as e:
             self._log_error(f"❌ Ошибка обновления LIVE папки: {e}")
 
-    def backtest_single(self, args: Tuple[str, str, str]) -> Tuple[str, str, str, Dict[str, Any]]:
+    def backtest_single(self, args: Tuple[str, str, str, bool]) -> Tuple[str, str, str, Dict[str, Any]]:
         """
         Выполняет полный цикл теста для одного актива и таймфрейма.
 
@@ -85,13 +85,17 @@ class BacktestRunner(BaseFileHandler):
         Returns:
             Tuple: Данные об инструменте и словарь с метриками (или ошибкой).
         """
-        symbol, tf, mode = args
-        self._log_info(f"[{mp.current_process().name}] {symbol} {tf}")
+        import time
+
+        symbol, tf, mode, use_sl = args
+        self._log_info(f"[{mp.current_process().name}] {symbol} {tf} | SL: {use_sl}")
         # Гарантируем, что miner и bt смотрят в self.exp_dir (папку сессии)
         shared_history_dir = self.exp_dir
 
         try:
             with MT5Client() as client:
+                start_data = time.time()
+
                 # --- ПОДГОТОВКА ДАННЫХ ---
                 tf_mt5 = getattr(mt5, f"TIMEFRAME_{tf}")
                 candles_count = get_candles(tf)
@@ -102,6 +106,9 @@ class BacktestRunner(BaseFileHandler):
                 # ШАГ 1: Генерация фич (MA, индикаторы) на всей истории для корректности
                 feat_gen = Features(verbose=False)
                 df_with_all_features = feat_gen.create_all_features(df_full)
+
+                time_data = time.time() - start_data
+
                 # ШАГ 2: Разделение на обучение (70%) и тест (30%)
                 split_70 = int(len(df_with_all_features) * 0.7)
                 # Для Майнера(обучение) отдаем СЫРЫЕ цены (он сам вызовет генерацию фич для train куска)
@@ -111,11 +118,25 @@ class BacktestRunner(BaseFileHandler):
                 test_features = df_with_all_features.iloc[split_70:].copy()
                 # --- ОБУЧЕНИЕ И ТЕСТ ---
                 # ШАГ 3: Майнер анализирует паттерны на тренировочном куске
+                start_mine = time.time()
+
                 miner = CandleMiner(min_confidence=0.7, min_support=10, verbose=False, history_dir=shared_history_dir)
                 train_results = miner.smart_analyze(train_df, symbol, tf)
+
+                time_mine = time.time() - start_mine
+
                 # ШАГ 4: Бэктестер проверяет паттерны на тестовом (новом) куске
+
+                start_bt = time.time()
+
                 bt = Backtester(symbol, verbose=False, history_dir=shared_history_dir)
-                metrics = bt.run_backtest(test_df_prices, test_features, symbol, tf, mode)
+                # ЛОГИКА УПРАВЛЕНИЯ СТОПОМ:
+                if not use_sl:
+                    # Если стоп не нужен, подменяем метод на возврат -1.0
+                    bt._get_sl_multiplier = lambda: -1.0
+                metrics = bt.run_backtest(test_df_prices, test_features, symbol, tf, mode, use_sl=use_sl)
+
+                time_bt = time.time() - start_bt
                 # Сбор финальных данных
                 pnl = metrics.get('total_pnl', 0) if 'error' not in metrics else 0
                 start_date = test_df_prices.iloc[0]['time'].strftime('%d.%m.%y')
@@ -127,8 +148,14 @@ class BacktestRunner(BaseFileHandler):
                 metrics.update({
                     'period': f"{start_date}-{end_date}",
                     'rules_count': len(train_results['all_rules']),
-                    'test_date': datetime.now().strftime('%Y-%m-%d %H:%M')
+                    'test_date': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                    'sl_enabled': use_sl
                 })
+
+            print(
+                f"⏱ [{symbol} {tf}] Сбор данных: {time_data:.1f}с | "
+                f"Обучение: {time_mine:.1f}с | Бэктест: {time_bt:.1f}с"
+            )
 
             return symbol, tf, mode, metrics
 
@@ -145,11 +172,17 @@ class BacktestRunner(BaseFileHandler):
         Returns:
         List: Список кортежей с результатами по каждому инструменту.
         """
-        tasks = [(s, t, "SIGNAL_TO_SIGNAL") for s in TEST_SYMBOLS for t in TEST_TIMEFRAMES]
+        # Формируем задачи: теперь кортеж содержит (symbol, timeframe, exit_mode, use_sl)
+        tasks = []
+        for s in TEST_SYMBOLS:
+            for t in TEST_TIMEFRAMES:
+                # Добавляем два варианта для каждой пары символ-таймфрейм
+                tasks.append((s, t, "SIGNAL_TO_SIGNAL", True))  # Тест с SL
+                tasks.append((s, t, "SIGNAL_TO_SIGNAL", False))  # Тест БЕЗ SL
 
-        print(f"{self._get_context()}: {len(tasks)} тестов × {self.max_workers} ядер")
+        print(f"{self._get_context()}: {len(tasks)} тестов (пары SL/NoSL) × {self.max_workers} ядер")
         print("=" * 80)
-        # Параллельное выполнение с визуализацией прогресса
+
         results = process_map(
             self.backtest_single,
             tasks,
@@ -171,29 +204,39 @@ class BacktestRunner(BaseFileHandler):
         if not self.results:
             self._log_warning("Нет результатов для сохранения")
             return
-        results_db = []
+
+            # Группируем результаты в словарь: { 'имя_режима': [список_результатов] }
+        groups = {}
 
         for symbol, tf, mode, metrics in self.results:
+            # Создаем уникальный суффикс для файла на основе настроек
+            sl_suffix = "with_sl" if metrics.get('sl_enabled', True) else "no_sl"
+            # Если в будущем добавите другие параметры (например, трал), добавьте их сюда
+            group_name = f"{mode.lower()}_{sl_suffix}"
 
             result = {
                 'symbol': symbol,
                 'timeframe': tf,
                 'mode': mode,
-                'test_date': datetime.now().strftime('%Y-%m-%d %H:%M'),
                 **metrics
             }
-            results_db.append(result)
 
-        # Сохранение в JSON (для парсинга системой)
-        json_path = self.results_dir / "backtest_results.json"
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(results_db, f, indent=2, ensure_ascii=False)
-        # Сохранение в CSV (для анализа в Excel/Pandas)
-        csv_path = self.results_dir / "backtest_results.csv"
-        pd.DataFrame(results_db).to_csv(csv_path, index=False, encoding='utf-8')
+            if group_name not in groups:
+                groups[group_name] = []
+            groups[group_name].append(result)
 
-        print(f"{self._get_context()}: 💾 Сохранено в: {self.exp_dir}/results/")
-        # Финальный шаг: делаем этот прогон актуальным для бота
+        # Сохраняем каждую группу в свой файл
+        for group_name, data in groups.items():
+            # 1. Сохранение в JSON
+            json_path = self.results_dir / f"results_{group_name}.json"
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            # 2. Сохранение в CSV
+            csv_path = self.results_dir / f"results_{group_name}.csv"
+            pd.DataFrame(data).to_csv(csv_path, index=False, encoding='utf-8')
+
+        print(f"{self._get_context()}: 💾 Сохранено групп: {len(groups)} в {self.results_dir}")
         self.update_live_directory()
 
     def print_summary(self):

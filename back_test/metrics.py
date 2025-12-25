@@ -21,11 +21,10 @@ class MetricsCalculator(BaseLogger):
             verbose (bool): Если True, разрешает детальный вывод в консоль.
         """
         super().__init__(verbose)
-        self.verbose = verbose
-
 
     def calculate(self, trades: List[Trade], initial_capital: float,
-                  rules_count: int = 0,  sl_hits: int = 0, equity_history: List[float]=None) -> Dict:
+                  rules_count: int = 0, sl_hits: int = 0, equity_history: List[float]=None,
+                  use_sl: bool=None) -> Dict:
         """
         Рассчитывает основные показатели эффективности стратегии.
 
@@ -35,6 +34,7 @@ class MetricsCalculator(BaseLogger):
             rules_count (int): Количество правил, участвовавших в генерации сигналов.
             sl_hits (int):
             equity_history (List[float]):
+            use_sl (bool) :
 
         Returns:
             Dict: Словарь со всеми рассчитанными метриками.
@@ -88,6 +88,7 @@ class MetricsCalculator(BaseLogger):
             'rules_count': rules_count,
             'recovery_factor': round(recovery_factor, 2),
             'sl_hits': sl_hits,
+            'sl_enabled': use_sl
         }
 
     def _calculate_max_drawdown(self, equity_curve: List[float]) -> float:
@@ -105,7 +106,8 @@ class MetricsCalculator(BaseLogger):
                 max_dd = drawdown
         return max_dd * 100.0  # В процентах
 
-    def print_metrics(self, metrics: Dict, symbol: str, tf: str, mode: str, period: str="", rules_count: int = 0):
+    def print_metrics(self, metrics: Dict, symbol: str, tf: str, mode: str,
+                      period: str=""):
         """
         Выводит отчёт в консоль в человекочитаемом виде.
 
@@ -123,24 +125,26 @@ class MetricsCalculator(BaseLogger):
             return
 
         total_trades = metrics.get('total_trades', 0)
-        actual_rules = metrics.get('rules_count', rules_count)
+
+        # Определяем текстовую метку для стоп-лосса
+        sl_label = "WITH SL" if metrics.get('sl_enabled') is True else "NO SL"
+        rules = metrics.get('rules_count')
+        period_str = f" {period}" if period.strip() else ""
 
         # --- Валидация качества данных ---
         # Если сделки есть, а правил в кэше ноль — это подозрительный результат
-        if total_trades > 0 and actual_rules == 0:
+        if total_trades > 0 and rules == 0:
             self._log_warning(f"⚠️  ВНИМАНИЕ: {total_trades} сделок при 0 правил! Проверьте кэш.")
         # Если сигналов не было — краткий вывод
         if total_trades == 0:
-            print(f"\n📊 {symbol} {tf} | {mode}")
+            print(f"\n📊 {symbol} {tf} | {mode} {sl_label} | {period_str} | правил: {rules}")
             print("-" * 60)
             print("❌ NO SIGNALS (0 trades)")
             return
 
         # --- Формирование красивого отчёта ---
-        rules = metrics.get('rules_count', rules_count)
-        period_str = f" | {period}" if period.strip() else ""
 
-        print(f"\n📊 {symbol} {tf} | {mode}{period_str} | правил: {rules}")
+        print(f"\n📊 {symbol} {tf} | {mode} {sl_label} | {period_str} | правил: {rules}")
         print("-" * 80)
 
         # Основные финансовые показатели

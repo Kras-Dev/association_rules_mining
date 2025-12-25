@@ -46,6 +46,7 @@ class Backtester(BaseFileHandler):
         self.timeframe = None
         self.total_sl_hits = 0
         self.equity_history = []
+        self.current_sl_mode = None
 
     def load_rules(self, symbol: str, timeframe: str) -> pd.DataFrame:
         """
@@ -104,7 +105,7 @@ class Backtester(BaseFileHandler):
         return pd.DataFrame(matched_rules) if matched_rules else pd.DataFrame()
 
     def run_backtest(self, df: pd.DataFrame, features: pd.DataFrame, symbol: str,
-                     timeframe: str, exit_mode: str = "SIGNAL_TO_SIGNAL",
+                     timeframe: str, exit_mode: str = "SIGNAL_TO_SIGNAL", use_sl=None
                      ) -> Dict:
         """
         Запускает основной цикл бэктестинга.
@@ -117,7 +118,7 @@ class Backtester(BaseFileHandler):
             exit_mode (str, optional): Режим выхода из сделки.
 
                 "SIGNAL_TO_SIGNAL". "ONE_CANDLE". "ATR_TP".
-
+            use_sl (bool):
         Returns:
             Dict: Словарь с метриками производительности стратегии.
         """
@@ -130,6 +131,7 @@ class Backtester(BaseFileHandler):
         self.reset()
         self.symbol = symbol
         self.timeframe = timeframe
+        self.current_sl_mode = use_sl
 
         self._log_info(f"{symbol} {timeframe} | {exit_mode}")
         self.rules = self.load_rules(symbol, timeframe)
@@ -177,8 +179,10 @@ class Backtester(BaseFileHandler):
         # Расчет и вывод метрик
         calculator = MetricsCalculator(verbose=self.verbose)
         metrics = calculator.calculate(self.trades, INITIAL_CAPITAL, rules_count,
-                                       sl_hits=self.total_sl_hits, equity_history=self.equity_history)
-        calculator.print_metrics(metrics, symbol, timeframe, exit_mode, period, rules_count)
+                                       sl_hits=self.total_sl_hits, equity_history=self.equity_history,
+                                       use_sl=self.current_sl_mode
+                                       )
+        calculator.print_metrics(metrics, symbol, timeframe, exit_mode, period)
         return metrics
 
     def _process_bar(self, row: pd.Series, features_row: pd.Series, atr: float, idx: int):
@@ -213,8 +217,8 @@ class Backtester(BaseFileHandler):
     def _get_sl_multiplier(self) -> float:
         """Определяет множитель стоп-лосса в зависимости от типа инструмента."""
         if self.symbol.startswith('#'):
-            return SL_MULTIPLIER['#']  # 1.5 акции
-        return SL_MULTIPLIER['rfd']  # 1.2 форекс
+            return SL_MULTIPLIER['#']  #  акции
+        return SL_MULTIPLIER['rfd']  # форекс
 
     def _check_entry(self, row: pd.Series, active_rules: pd.DataFrame, atr: float, idx: int):
         """
@@ -375,3 +379,6 @@ class Backtester(BaseFileHandler):
         self.position = None
         self.total_sl_hits = 0
         self.equity_history = []
+
+
+
