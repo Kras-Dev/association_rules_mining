@@ -26,7 +26,7 @@ class Backtester(BaseFileHandler):
         timeframe (str): Используемый таймфрейм (например, 'H1').
     """
 
-    def __init__(self, symbol: str, verbose: bool = False, history_dir: Path = None):
+    def __init__(self, symbol: str, verbose: bool = True, history_dir: Path = None):
         """
         Инициализация бэктестера.
 
@@ -88,15 +88,16 @@ class Backtester(BaseFileHandler):
 
         for idx, rule in self.rules.iterrows():
             rule_name = rule['rule_name']
+            # 1. Заменяем 'prev' и 'curr' на специальный разделитель, например '|'
+            # 2. Убираем лишние подчеркивания вокруг них
+            clean_name = rule_name.replace('_prev_', '|').replace('_curr_', '|')
 
-            # Разбиваем имя правила на части и убираем связки 'prev' и 'curr'
-            # Также убираем пустые строки, если они возникнут
-            parts = [word for word in rule_name.split('_')
-                     if word not in ('prev', 'curr', '')]
+            # 3. Разбиваем по разделителю и очищаем от пустых строк
+            # Теперь из 'big_red_prev_big_green' мы получим ['big_red', 'big_green']
+            needed_features = [p.strip('_') for p in clean_name.split('|') if p]
 
-            # Проверяем, что ВСЕ части правила (признаки) есть в активных на текущем баре
-            # Используем set.issubset для мгновенной проверки
-            if set(parts).issubset(active_features_on_bar):
+            # 4. Проверяем наличие полных имен фич в активных колонках
+            if set(needed_features).issubset(active_features_on_bar):
                 matched_rules.append(rule.to_dict())
 
         return pd.DataFrame(matched_rules) if matched_rules else pd.DataFrame()

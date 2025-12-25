@@ -87,6 +87,8 @@ class BacktestRunner(BaseFileHandler):
         """
         symbol, tf, mode = args
         self._log_info(f"[{mp.current_process().name}] {symbol} {tf}")
+        # Гарантируем, что miner и bt смотрят в self.exp_dir (папку сессии)
+        shared_history_dir = self.exp_dir
 
         try:
             with MT5Client() as client:
@@ -109,10 +111,10 @@ class BacktestRunner(BaseFileHandler):
                 test_features = df_with_all_features.iloc[split_70:].copy()
                 # --- ОБУЧЕНИЕ И ТЕСТ ---
                 # ШАГ 3: Майнер анализирует паттерны на тренировочном куске
-                miner = CandleMiner(min_confidence=0.7, min_support=10, verbose=False, history_dir=self.exp_dir)
+                miner = CandleMiner(min_confidence=0.7, min_support=10, verbose=False, history_dir=shared_history_dir)
                 train_results = miner.smart_analyze(train_df, symbol, tf)
                 # ШАГ 4: Бэктестер проверяет паттерны на тестовом (новом) куске
-                bt = Backtester(symbol, verbose=False, history_dir=self.exp_dir)
+                bt = Backtester(symbol, verbose=False, history_dir=shared_history_dir)
                 metrics = bt.run_backtest(test_df_prices, test_features, symbol, tf, mode)
                 # Сбор финальных данных
                 pnl = metrics.get('total_pnl', 0) if 'error' not in metrics else 0

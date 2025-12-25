@@ -28,7 +28,7 @@ class CandleMiner(BaseFileHandler):
         self.min_confidence = min_confidence
         self.min_support = min_support
 
-    def save_rules(self, results: Dict, symbol: str, tf: str, min_confidence: float = 0.70) -> str:
+    def save_rules(self, results: Dict, symbol: str, tf: str, min_confidence: float = 0.65) -> str:
         """
         Фильтрация и сохранение найденных правил в кэш (pickle).
 
