@@ -2,8 +2,9 @@ from pathlib import Path
 from association_miner.features_engineer import Features
 from tqdm import tqdm
 import pandas as pd
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Any
 
+from back_test.config import SL_MULTIPLIER, ARM_CONFIG
 from utils.base_file_handler import BaseFileHandler
 
 
@@ -134,14 +135,13 @@ class CandleMiner(BaseFileHandler):
         Умный анализ: возвращает закэшированные правила или запускает новый поиск
         с динамической фильтрацией признаков для оптимизации скорости.
         """
-        current_conf = self.min_confidence
-        current_supp = self.min_support
-        if any(tf in timeframe for tf in ['M15', 'M30']):
-            current_supp = max(current_supp, 35)  # Нужно больше подтверждений
-            current_conf = min(current_conf, 0.65)  # Но чуть лояльнее к точности
-        elif 'D1' in timeframe or 'W1' in timeframe:
-            current_supp = min(current_supp, 20)  # Достаточно 20 раз за 10 лет
-            current_conf = max(current_conf, 0.70)  # Но требуем железную точность
+        # Поиск настроек (берем значение или дефолт)
+        config = ARM_CONFIG.get(timeframe, {
+            'min_support': self.min_support,
+            'min_confidence': self.min_confidence
+        })
+        current_supp = config['min_support']
+        current_conf = config['min_confidence']
 
         # 1. Пробуем загрузить существующую "модель" из кэша
         cached = self._load_cache(self._get_cache_path(symbol, timeframe))
@@ -230,3 +230,53 @@ class CandleMiner(BaseFileHandler):
                               f"Лучший результат: {max_conf:.2%}")
             return {'all_rules': pd.DataFrame(), 'error': 'No strong rules', 'from_cache': False}
 
+    def get_dynamic_params(self, symbol: str, timeframe: str) -> Dict[str, Any]:
+        """
+        ДИНАМИЧЕСКАЯ ЛОГИКА: conf + supp + SL_MULTIPLIER по TF/инструменту
+
+        """
+        current_conf = 0.68  # Базовый
+        current_supp = 22  # Базовый
+        sl_mult_key = symbol[:1]  # '#' или 'r'
+
+        # 🔥 TF-ЛОГИКА (по приоритету качества сигналов)
+        if 'M15' in timeframe:
+            current_supp = 35
+            current_conf = 0.65  # ✅ ROSN/SBER +35/+23%
+        elif 'M30' in timeframe:
+            current_supp = 35
+            current_conf = 0.67  # ✅ USDCAD/MOEX +10/+13%
+        elif 'H1' in timeframe:
+            current_supp = 25 if symbol.startswith('#') else 28
+            current_conf = 0.70 if symbol.startswith('#') else 0.68  # MOEX H1 +19%
+        elif 'H4' in timeframe:
+            if symbol.startswith('#'):  # Акции
+                current_conf = 0.70
+                current_supp = 25
+            else:  # Форекс
+                if symbol in ['USDCADrfd', 'EURUSDrfd']:
+                    current_conf = 0.70
+                    current_supp = 22  # EUR H4 Calmar 2.15
+                else:  # GBPUSD, USDJPY
+                    current_conf = 0.68
+                    current_supp = 28
+        elif 'D1' in timeframe:
+            current_supp = 20
+            current_conf = 0.72  # 🏆 MOEX D1 Calmar 5.32!
+
+        # 🔥 SL_MULTIPLIER по TF (жестче = меньше шума)
+        if 'M15' in timeframe or 'M30' in timeframe:
+            SL_MULTIPLIER[sl_mult_key] = 2.2  # Шум → жесткий SL
+        elif 'D1' in timeframe:
+            SL_MULTIPLIER[sl_mult_key] = 1.8  # Чистый сигнал → мягкий SL
+        elif 'H4' in timeframe:
+            SL_MULTIPLIER[sl_mult_key] = 1.9 if symbol.startswith('#') else 2.0
+        else:  # H1
+            SL_MULTIPLIER[sl_mult_key] = 2.0
+
+        return {
+            'min_confidence': current_conf,
+            'min_support': current_supp,
+            'sl_multiplier_key': sl_mult_key,
+            'sl_multiplier': SL_MULTIPLIER[sl_mult_key]
+        }

@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import talib
 from typing import Dict, Optional, cast
-from tqdm import tqdm
 
 from back_test.config import *
 from back_test.trade import PositionManager, Trade

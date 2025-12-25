@@ -33,6 +33,19 @@ class Features(BaseLogger):
         features['lower_shadow'] = np.minimum(c, o) - l
         features['total_range'] = h - l
 
+        # ГАП-ФИЛЬТР
+        prev_close = c.shift(1).fillna(c)
+        gap_up = (o > prev_close * 1.002).astype(float)  # Gap >0.2%
+        gap_down = (o < prev_close * 0.998).astype(float)  # Gap >0.2%
+        big_gap_up = (o > prev_close * 1.005).astype(float)  # Gap >0.5%
+        big_gap_down = (o < prev_close * 0.995).astype(float)  # Gap >0.5%
+
+        # Гап + объем
+        features['gap_up'] = gap_up
+        features['gap_down'] = gap_down
+        features['big_gap_up'] = big_gap_up
+        features['big_gap_down'] = big_gap_down
+
         # % ОТ РЕЙНДЖА
         total_range_safe = features['total_range'].replace(0, np.nan)
         features['body_pct'] = features['body_size'] / total_range_safe
@@ -294,12 +307,23 @@ class Features(BaseLogger):
         return features
 
 
+    # def create_target(self, df: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
+    #     # Таргеты на 1 шаг вперед. Look-ahead bias отсутствует, если последняя строка удаляется позже.
+    #     features['next_up'] = (df['close'].shift(-1) > df['close']).astype(float)
+    #     features['next_down'] = (df['close'].shift(-1) < df['close']).astype(float)
+    #
+    #     self._log_debug(f"FINALS с target:{len(features)}")
+    #     return features
     def create_target(self, df: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
-        # Таргеты на 1 шаг вперед. Look-ahead bias отсутствует, если последняя строка удаляется позже.
-        features['next_up'] = (df['close'].shift(-1) > df['close']).astype(float)
-        features['next_down'] = (df['close'].shift(-1) < df['close']).astype(float)
+        atr = self.calculate_atr(df)  # Используем ваш метод ATR
 
-        self._log_debug(f"FINALS с target:{len(features)}")
+        # Сдвиг на -1 (следующая свеча)
+        diff = df['close'].shift(-1) - df['close']
+
+        # Цель: движение вверх больше, чем 0.2 * ATR (фильтр шума)
+        features['next_up'] = (diff > (atr * 0.2)).astype(float)
+        features['next_down'] = (diff < -(atr * 0.2)).astype(float)
+
         return features
 
     def create_all_features(self, df: pd.DataFrame) -> pd.DataFrame:

@@ -74,3 +74,12 @@ def get_candles(tf: str) -> int:
     """
     # Если таймфрейм не найден, возвращаем большое значение по умолчанию
     return CANDLES_BY_TF.get(tf, 35000)
+
+# Конфигурация параметров ARM для разных ТФ
+ARM_CONFIG = {
+    'M15': {'min_support': 50, 'min_confidence': 0.71},
+    'M30': {'min_support': 45, 'min_confidence': 0.71},
+    'H1':  {'min_support': 33, 'min_confidence': 0.74},
+    'H4':  {'min_support': 26, 'min_confidence': 0.75},
+    'D1':  {'min_support': 20, 'min_confidence': 0.76},
+}
