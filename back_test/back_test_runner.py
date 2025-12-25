@@ -1,7 +1,7 @@
 """🚀 Backtest Runner с сохранением JSON!"""
 import multiprocessing as mp
 import shutil
-
+import time
 from tqdm.contrib.concurrent import process_map
 from association_miner.candle_miner import CandleMiner
 from association_miner.features_engineer import Features
@@ -85,8 +85,6 @@ class BacktestRunner(BaseFileHandler):
         Returns:
             Tuple: Данные об инструменте и словарь с метриками (или ошибкой).
         """
-        import time
-
         symbol, tf, mode, use_sl = args
         self._log_info(f"[{mp.current_process().name}] {symbol} {tf} | SL: {use_sl}")
         # Гарантируем, что miner и bt смотрят в self.exp_dir (папку сессии)
@@ -134,7 +132,8 @@ class BacktestRunner(BaseFileHandler):
                 if not use_sl:
                     # Если стоп не нужен, подменяем метод на возврат -1.0
                     bt._get_sl_multiplier = lambda: -1.0
-                metrics = bt.run_backtest(test_df_prices, test_features, symbol, tf, mode, use_sl=use_sl)
+                metrics = bt.run_backtest(test_df_prices, test_features, symbol, tf,
+                                          mode, use_sl=use_sl, rules_data=train_results)
 
                 time_bt = time.time() - start_bt
                 # Сбор финальных данных

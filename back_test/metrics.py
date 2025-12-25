@@ -70,7 +70,11 @@ class MetricsCalculator(BaseLogger):
         ref_equity = np.array(equity_history) if equity_history else equity_curve_closed
         max_dd_money = (np.maximum.accumulate(ref_equity) - ref_equity).max()
         recovery_factor = total_pnl / max_dd_money if max_dd_money > 0 else 0
-
+        # SHARPE RATIO
+        pnl_values = trades_df['pnl']
+        sharpe = pnl_values.mean() / pnl_values.std() if pnl_values.std() > 0 else 0
+        # CALMAR RATIO
+        calmar = pnl_pct / max_floating_dd if max_floating_dd > 0 else 0
         return {
             'total_trades': len(trades_df),
             'win_rate': len(wins) / len(trades_df) if len(trades_df) > 0 else 0,
@@ -83,6 +87,8 @@ class MetricsCalculator(BaseLogger):
             'avg_win': round(avg_win, 2),
             'avg_loss': round(avg_loss, 2),
             'rr_ratio': round(rr_ratio, 2),
+            'sharpe_ratio': round(sharpe, 3),
+            'calmar_ratio': round(calmar, 2),
             'best_trade': round(trades_df['pnl'].max(), 2),
             'worst_trade': round(trades_df['pnl'].min(), 2),
             'rules_count': rules_count,
@@ -96,18 +102,13 @@ class MetricsCalculator(BaseLogger):
         if not equity_curve:
             return 0.0
 
-        peak = equity_curve[0]
-        max_dd = 0.0
-        for value in equity_curve:
-            if value > peak:
-                peak = value
-            drawdown = (peak - value) / peak if peak != 0 else 0.0
-            if drawdown > max_dd:
-                max_dd = drawdown
-        return max_dd * 100.0  # В процентах
+        arr = np.array(equity_curve)
+        peaks = np.maximum.accumulate(arr)
+        drawdowns = (peaks - arr) / peaks
+        return drawdowns.max() * 100.0
 
     def print_metrics(self, metrics: Dict, symbol: str, tf: str, mode: str,
-                      period: str=""):
+                      period: str="", min_conf: float | str = 0 ):
         """
         Выводит отчёт в консоль в человекочитаемом виде.
 
@@ -117,7 +118,6 @@ class MetricsCalculator(BaseLogger):
             tf (str): Таймфрейм.
             mode (str): Режим выхода.
             period (str): Строка временного диапазона теста.
-            rules_count (int): Кол-во правил (используется как fallback).
         """
         # --- Обработка ошибок в метриках ---
         if 'error' in metrics:
@@ -144,7 +144,7 @@ class MetricsCalculator(BaseLogger):
 
         # --- Формирование красивого отчёта ---
 
-        print(f"\n📊 {symbol} {tf} | {mode} {sl_label} | {period_str} | правил: {rules}")
+        print(f"\n📊 {symbol} {tf} | {mode} {sl_label} | {period_str} | правил: {rules} | min_conf: {min_conf}")
         print("-" * 80)
 
         # Основные финансовые показатели
@@ -160,13 +160,15 @@ class MetricsCalculator(BaseLogger):
         print(f"📉 Floating DD:     {metrics['max_floating_dd']}% — Худшая точка (плавающая просадка) за всю историю")
         print(f"📊 Equity DD:       {metrics['max_equity_dd']}% — Макс. просадка только по зафиксированным сделкам")
 
+        print(f"📊 Sharpe ratio:    {metrics['sharpe_ratio']} — Сколько профита на 1 единицу риска. Стабильность. >0.15: Хорошо, <0.10: Нестабильно")
+        print(f"📊 Calmar ratio:    {metrics['calmar_ratio']} — Сколько профита на 1% просадки. Эффективность. >1.0: Норма, >2.0: Отлично")
         # Сравнение сделок
         print(f"⭐ Best Trade:      ${metrics['best_trade']} — Самая прибыльная сделка")
         print(f"💥 Worst Trade:     ${metrics['worst_trade']} — Самая убыточная сделка")
 
         # Эффективность восстановления
         print(
-            f"🛡️ Recovery Factor: {metrics['recovery_factor']} — Способность системы восстанавливаться после просадок (лучше > 1.0)")
+            f"🛡️ Recovery Factor:  {metrics['recovery_factor']} — Способность системы восстанавливаться после просадок (лучше > 1.0)")
         print(
             f"💵 Avg Win/Loss:    ${metrics['avg_win']} / ${metrics['avg_loss']} — Средний профит и средний лосс на сделку, {abs(metrics['avg_win']/metrics['avg_loss']):.2f}")
 

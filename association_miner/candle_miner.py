@@ -13,7 +13,7 @@ class CandleMiner(BaseFileHandler):
     Находит правила (features), которые предсказывают движение цены с уверенностью (confidence) 60%+.
     """
 
-    def __init__(self, min_confidence: float = 0.60, min_support: int = 21, verbose: bool = False,
+    def __init__(self, min_confidence: float = 0.68, min_support: int = 22, verbose: bool = False,
                  history_dir: Path = None):
         """
         Инициализация майнера правил.
@@ -28,7 +28,7 @@ class CandleMiner(BaseFileHandler):
         self.min_confidence = min_confidence
         self.min_support = min_support
 
-    def save_rules(self, results: Dict, symbol: str, tf: str, min_confidence: float = 0.69) -> str:
+    def save_rules(self, results: Dict, symbol: str, tf: str, min_confidence: float = None) -> str:
         """
         Фильтрация и сохранение найденных правил в кэш (pickle).
 
@@ -41,6 +41,9 @@ class CandleMiner(BaseFileHandler):
         Returns:
             str: Путь к сохраненному файлу кэша.
         """
+        if min_confidence is None:
+            min_confidence = self.min_confidence
+
         cache_file = self._get_cache_path(symbol, tf)
         # Фильтруем правила: оставляем только самые надежные для продакшена
         high_conf_rules = results['all_rules'][results['all_rules']['confidence'] >= min_confidence]
@@ -52,7 +55,8 @@ class CandleMiner(BaseFileHandler):
             'base_prob_down': results['base_prob_down'],
             'symbol': symbol, 'tf': tf,
             'timestamp': pd.Timestamp.now(),
-            'total_features': len(results['all_features'].columns)
+            'total_features': results.get('total_features', 0),
+            'min_confidence': results.get('min_confidence', -1),
         }
         self._save_cache(cache_file, cache)
         self._log_info(f"[CandleMiner]: 💾 Сохранено: {cache_file} ({rules_count}/{len(results['all_rules'])} "
@@ -127,47 +131,102 @@ class CandleMiner(BaseFileHandler):
 
     def smart_analyze(self, df: pd.DataFrame, symbol: str, timeframe: str) -> Dict:
         """
-        Умный анализ: возвращает закэшированные правила или запускает новый поиск.
+        Умный анализ: возвращает закэшированные правила или запускает новый поиск
+        с динамической фильтрацией признаков для оптимизации скорости.
         """
-        # 1. Пробуем загрузить существующую "модель"
-        cached = self.load_rules(symbol, timeframe)
+        current_conf = self.min_confidence
+        current_supp = self.min_support
+        if any(tf in timeframe for tf in ['M15', 'M30']):
+            current_supp = max(current_supp, 35)  # Нужно больше подтверждений
+            current_conf = min(current_conf, 0.65)  # Но чуть лояльнее к точности
+        elif 'D1' in timeframe or 'W1' in timeframe:
+            current_supp = min(current_supp, 20)  # Достаточно 20 раз за 10 лет
+            current_conf = max(current_conf, 0.70)  # Но требуем железную точность
+
+        # 1. Пробуем загрузить существующую "модель" из кэша
+        cached = self._load_cache(self._get_cache_path(symbol, timeframe))
         if cached:
-            self._log_info(f"КЭШ АКТУАЛЕН ({len(df)} свечей)")
+            self._log_info(f"✅ КЭШ АКТУАЛЕН: {symbol} {timeframe} ({len(df)} свечей)")
             return {
                 'all_rules': cached['top_rules'],
                 'base_prob_up': cached['base_prob_up'],
                 'base_prob_down': cached['base_prob_down'],
-                'symbol': symbol, 'tf': timeframe, 'from_cache': True
+                'symbol': symbol,
+                'tf': timeframe,
+                'from_cache': True,
+                'min_confidence': cached['min_confidence'],
+
             }
-        # 2. Если кэша нет - запускаем Feature Engineering и Mining
-        self._log_info(f"ПОЛНЫЙ АНАЛИЗ {symbol} {timeframe}")
+
+        # 2. Если кэша нет - запускаем Feature Engineering
+        self._log_info(f"🔍 ПОЛНЫЙ АНАЛИЗ {symbol} {timeframe} (Старт майнинга)")
 
         feat_gen = Features(verbose=self.verbose)
         all_features = feat_gen.create_all_features(df)
-        # 3. Поиск закономерностей
-        buy_rules, sell_rules, all_rules = self.find_strong_rules(all_features)
-        # Фильтруем для "сильных" правил (тех, что пойдут в результаты)
-        strong_rules = all_rules[all_rules['confidence'] >= self.min_confidence] \
-                    if not all_rules.empty else pd.DataFrame()
+
+        if all_features.empty:
+            self._log_error("No features generated")
+            return {'all_rules': pd.DataFrame(), 'error': 'No features generated'}
+
+        # --- ДИНАМИЧЕСКАЯ ФИЛЬТРАЦИЯ ПРИЗНАКОВ (Оптимизация 2025) ---
+        # Считаем, какой % от всей истории составляет твой min_support (21)
+        # На D1 (3000 св.) это ~0.7%, на H4 (6000 св.) это ~0.35%
+        total_rows = len(all_features)
+        dynamic_support_pct = current_supp / total_rows
+
+        # Ограничиваем снизу (не меньше 0.1%), чтобы не перегружать Apriori на M15/H1
+        effective_support_pct = max(0.001, dynamic_support_pct)
+        min_support_count = total_rows * effective_support_pct
+
+        initial_feat_count = all_features.shape[1]
+
+        # Отбираем колонки, где количество "единиц" (сигналов) >= порога
+        # Исключаем целевые колонки из фильтрации, чтобы они не пропали
+        targets = ['next_up', 'next_down']
+        cols_to_check = [c for c in all_features.columns if c not in targets]
+
+        # Быстрый подсчет сумм по колонкам
+        feat_sums = all_features[cols_to_check].sum()
+        keep_cols = feat_sums[feat_sums >= min_support_count].index.tolist()
+
+        # Формируем оптимизированный набор данных для поиска правил
+        all_features_filtered = all_features[keep_cols + targets]
+
+        self._log_info(f"Оптимизация: Фичи {initial_feat_count} -> {len(keep_cols) + 2} "
+                       f"(Порог: {effective_support_pct:.2%} или {int(min_support_count)} баров)")
+
+        # 3. Поиск закономерностей (на облегченных данных)
+        buy_rules, sell_rules, all_rules = self.find_strong_rules(all_features_filtered)
+
+        # 4. Фильтруем для "сильных" правил согласно установленному min_confidence (0.63)
+        if not all_rules.empty:
+            strong_rules = all_rules[all_rules['confidence'] >= current_conf]
+        else:
+            strong_rules = pd.DataFrame()
 
         base_prob_up = all_features['next_up'].mean()
         base_prob_down = all_features['next_down'].mean()
-        if not strong_rules.empty:
-            # 4. Формирование финального словаря результатов
-            results = {
-                'all_features': all_features, 'buy_rules': buy_rules, 'sell_rules': sell_rules,
-                'all_rules': strong_rules, 'base_prob_up': base_prob_up, 'base_prob_down': base_prob_down,
-                'symbol': symbol, 'tf_name': timeframe
-            }
-            # 5. Автоматическое сохранение результатов
-            self.save_rules(results, symbol, timeframe, min_confidence=0.70)
-        else:
-            # Находим лучшие показатели среди всех попыток, даже если они слабые
-            max_conf = all_rules['confidence'].max() if not all_rules.empty else 0
-            max_lift = all_rules['lift'].max() if not all_rules.empty else 0
-            msg = f"⚠️ Для {symbol} {timeframe} сильных правил не найдено."
-            if max_conf > 0:
-                msg += f" (Лучший Conf: {max_conf:.2%}, Lift: {max_lift:.2f})"
 
-            self._log_warning(f"{msg}. Кэш не создан.")
-        return {'all_rules': pd.DataFrame(), 'error': 'No strong rules'}
+        if not strong_rules.empty:
+            # 5. Формирование финального словаря результатов
+            results = {
+                'all_rules': strong_rules,
+                'base_prob_up': base_prob_up,
+                'base_prob_down': base_prob_down,
+                'symbol': symbol,
+                'tf': timeframe,
+                'total_features': len(keep_cols),
+                'min_confidence': current_conf,
+            }
+            # 6. Сохранение (используем порог из конфига класса)
+            self.save_rules(results, symbol, timeframe, min_confidence=current_conf)
+            self._log_info(f"💾 Найдено и сохранено {len(strong_rules)} правил.")
+
+            return {**results, 'from_cache': False}
+        else:
+            # Логика обработки отсутствия правил
+            max_conf = all_rules['confidence'].max() if not all_rules.empty else 0
+            self._log_warning(f"⚠️ Сильных правил (>{self.min_confidence}) не найдено. "
+                              f"Лучший результат: {max_conf:.2%}")
+            return {'all_rules': pd.DataFrame(), 'error': 'No strong rules', 'from_cache': False}
+

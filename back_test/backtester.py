@@ -1,6 +1,8 @@
 """ Основной класс для запуска симуляции торговых стратегий (бэктестинга)"""
 
 from pathlib import Path
+
+import numpy as np
 import pandas as pd
 import talib
 from typing import Dict, Optional, cast
@@ -47,6 +49,7 @@ class Backtester(BaseFileHandler):
         self.total_sl_hits = 0
         self.equity_history = []
         self.current_sl_mode = None
+        self.current_min_conf = None
 
     def load_rules(self, symbol: str, timeframe: str) -> pd.DataFrame:
         """
@@ -104,151 +107,11 @@ class Backtester(BaseFileHandler):
 
         return pd.DataFrame(matched_rules) if matched_rules else pd.DataFrame()
 
-    def run_backtest(self, df: pd.DataFrame, features: pd.DataFrame, symbol: str,
-                     timeframe: str, exit_mode: str = "SIGNAL_TO_SIGNAL", use_sl=None
-                     ) -> Dict:
-        """
-        Запускает основной цикл бэктестинга.
-
-        Args:
-            df (pd.DataFrame): DataFrame с ценами (OHLCV).
-            features (pd.DataFrame): DataFrame с предрассчитанными признаками.
-            symbol (str): Торгуемый инструмент.
-            timeframe (str): Таймфрейм.
-            exit_mode (str, optional): Режим выхода из сделки.
-
-                "SIGNAL_TO_SIGNAL". "ONE_CANDLE". "ATR_TP".
-            use_sl (bool):
-        Returns:
-            Dict: Словарь с метриками производительности стратегии.
-        """
-        # СИНХРОНИЗАЦИЯ. Оставляем только те строки, которые есть в обоих датафреймах
-        common_index = df.index.intersection(features.index)
-        df = df.loc[common_index].copy()
-        features = features.loc[common_index].copy()
-
-        self.exit_mode = exit_mode
-        self.reset()
-        self.symbol = symbol
-        self.timeframe = timeframe
-        self.current_sl_mode = use_sl
-
-        self._log_info(f"{symbol} {timeframe} | {exit_mode}")
-        self.rules = self.load_rules(symbol, timeframe)
-        rules_count = len(self.rules) if not self.rules.empty else 0
-        # --- Проверка наличия правил/сигналов ---
-        if self.rules.empty:
-            self._log_warning(f"⚠️ Нет правил для {symbol} {timeframe}, тест пропущен.")
-            return {'error': 'Нет правил'}
-
-        self._log_info(f"Используем {features.shape[1]} готовых фич")
-
-        # Быстрая проверка сигналов для оценки перспективности
-        signal_count = 0
-        limit = min(1000, len(df))
-        for i in tqdm(range(limit), desc="Signals", miniters=100, disable=not self.verbose):
-            active_rules = self.get_active_rules(features.iloc[i])
-            if not active_rules.empty and 'direction' in active_rules.columns:
-                signal_count += 1
-
-        if signal_count == 0:
-            self._log_warning(f"⚠️ Нет сигналов для теста {symbol} {timeframe}, тест пропущен.")
-            return {'error': 'Нет сигналов'}
-
-        # --- Основной цикл симуляции ---
-        # Расчет ATR (Average True Range) для управления рисками
-        atr = self.calculate_atr(df)
-        desc = f"💹 Backtest {symbol[:6]}" if self.verbose else None
-        with tqdm(total=len(df) - 200, desc=desc, miniters=500, leave=self.verbose, disable=not self.verbose) as pbar:
-            for i in range(200, len(df)):
-                self._process_bar(df.iloc[i], features.iloc[i], atr.iloc[i], i)
-                if self.verbose:
-                    pbar.update(1)
-                    pbar.set_postfix({
-                        'Capital': f"${self.capital:.0f}",
-                        'Trades': len(self.trades),
-                        'Pos': 'YES' if self.position else 'NO'
-                    })
-        # --- Финализация результатов ---
-        if self.position:
-            self._close_position(df.iloc[-1], len(df) - 1)
-        # Форматирование периода теста
-        start_date = df.iloc[0]['time'].strftime('%d-%m-%Y')
-        end_date = df.iloc[-1]['time'].strftime('%d-%m-%Y')
-        period = f"[{start_date} → {end_date}]"
-        # Расчет и вывод метрик
-        calculator = MetricsCalculator(verbose=self.verbose)
-        metrics = calculator.calculate(self.trades, INITIAL_CAPITAL, rules_count,
-                                       sl_hits=self.total_sl_hits, equity_history=self.equity_history,
-                                       use_sl=self.current_sl_mode
-                                       )
-        calculator.print_metrics(metrics, symbol, timeframe, exit_mode, period)
-        return metrics
-
-    def _process_bar(self, row: pd.Series, features_row: pd.Series, atr: float, idx: int):
-        """
-        Обрабатывает один бар в цикле бэктеста.
-
-        Args:
-            row (pd.Series): Текущий бар цен.
-            features_row (pd.Series): Текущие признаки.
-            atr (float): Текущее значение ATR.
-            idx (int): Индекс бара.
-        """
-        active_rules = self.get_active_rules(features_row)
-
-        # Вход
-        if not self.position:
-            self._check_entry(row, active_rules, atr, idx)
-        # --- Управление открытой позицией ---
-        else:
-            # 1. Сначала проверяем выход
-            if self._check_exit(row, features_row, active_rules, atr, idx):
-                self._close_position(row, idx)
-            else:
-                # 2. Если не вышли, тогда возможен пирамидинг
-                self._check_pyramid(active_rules, row['close'])
-                # После обработки бара, сохраняем текущий баланс + плавающий PnL
-
-        current_unrealized_pnl = self.pos_manager.calculate_unrealized_pnl(self.position, row['close'])
-        current_equity = self.capital + current_unrealized_pnl
-        self.equity_history.append(current_equity)
-
     def _get_sl_multiplier(self) -> float:
         """Определяет множитель стоп-лосса в зависимости от типа инструмента."""
         if self.symbol.startswith('#'):
             return SL_MULTIPLIER['#']  #  акции
         return SL_MULTIPLIER['rfd']  # форекс
-
-    def _check_entry(self, row: pd.Series, active_rules: pd.DataFrame, atr: float, idx: int):
-        """
-        Проверяет условия для входа в позицию (Long/Short).
-        """
-        if active_rules.empty or len(active_rules) == 0:
-            return
-        # ПРОВЕРКА КОЛОНОК!
-        if 'direction' not in active_rules.columns:
-            self._log_error(f"⚠️ Нет колонки 'direction' в {len(active_rules)} правилах")
-            return
-        # --- Расчет размера позиции ---
-        buy_rules = active_rules[active_rules['direction'] == 'UP']
-        sell_rules = active_rules[active_rules['direction'] == 'DOWN']
-
-        sl_mult = self._get_sl_multiplier()
-        risk_amount = self.capital * RISK_PER_TRADE
-        sl_mult_effective = sl_mult if sl_mult > 0 else 1.0
-        denom = (atr * SL_ATR_MULTIPLIER * sl_mult_effective)
-        size = risk_amount / denom if denom != 0 else 0
-        # --- Вход в Long/Short по правилу с максимальным 'lift' (силой) ---
-        if len(buy_rules) > 0:
-            rule = buy_rules.loc[buy_rules['lift'].idxmax()]
-            self.position = self.pos_manager.create_long(
-                row['close'], atr, size, cast(pd.Timestamp, row.name), idx, rule['rule_name'], sl_mult)
-
-        elif len(sell_rules) > 0:
-            rule = sell_rules.loc[sell_rules['lift'].idxmax()]
-            self.position = self.pos_manager.create_short(
-                row['close'], atr, size, cast(pd.Timestamp, row.name), idx, rule['rule_name'], sl_mult)
 
     def _check_pyramid(self, active_rules: pd.DataFrame, current_price: float):
         """
@@ -261,68 +124,6 @@ class Backtester(BaseFileHandler):
                                  ('UP' if self.position['type'] == 'LONG' else 'DOWN')]
         if len(dir_rules) > 0:
             self.position = self.pos_manager.pyramid(self.position, current_price, multiplier=0.5)
-
-    def _check_exit(self, row: pd.Series, features_row: pd.Series,
-                    active_rules: pd.DataFrame, atr: float, idx: int) -> bool:
-        """
-        Проверяет условия выхода из позиции.
-
-        Обрабатывает Stop Loss, Take Profit и выходы по противоположному сигналу.
-        """
-        # Если стопа нет, пропускаем блок проверок SL по теням
-        if self.position['sl'] is not None:
-            # --- Всегда проверяем Stop Loss (по теням свечи) для всех режимов---
-            if self.position['type'] == 'LONG':
-                # Обработка гэпа: если Open уже ниже SL, закрываем по Open
-                if row['open'] <= self.position['sl']:
-                    self.position['exit_price_override'] = row['open']
-                    return True
-                # Касание SL внутри бара: закрываем по цене SL
-                if row['low'] <= self.position['sl']:
-                    self.position['exit_price_override'] = self.position['sl']
-                    return True
-            else:  # SHORT
-                # Обработка гэпа: если Open уже выше SL, закрываем по Open
-                if row['open'] >= self.position['sl']:
-                    self.position['exit_price_override'] = row['open']
-                    return True
-                # Касание SL внутри бара: закрываем по цене SL
-                if row['high'] >= self.position['sl']:
-                    self.position['exit_price_override'] = self.position['sl']
-                    return True
-
-        if active_rules.empty or 'direction' not in active_rules.columns:
-            # Если нет правил выхода - проверяем только TP/ONE_CANDLE
-            pass
-        # --- Проверка выхода по противоположному сигналу (SIGNAL_TO_SIGNAL) ---
-        else:
-            if self.exit_mode == "SIGNAL_TO_SIGNAL":
-                opp_rules = active_rules[active_rules['direction'] !=
-                                         ('UP' if self.position['type'] == 'LONG' else 'DOWN')]
-                if len(opp_rules) > 0:
-                    return True
-        # --- Проверка других режимов выхода (ONE_CANDLE, ATR_TP) ---
-        # Остальные режимы (НЕ зависят от active_rules)
-        if self.exit_mode == "ONE_CANDLE":
-            # Выход через 1 бар после входа
-            return idx >= self.position['entry_idx'] + 1
-
-        elif self.exit_mode == "ATR_TP":
-            # Выход по Take Profit, рассчитанному на базе ATR
-            tp_dist = atr * TP_ATR_MULTIPLIER
-            if self.position['type'] == 'LONG':
-                if row['high'] >= self.position['entry'] + tp_dist:
-                    # Устанавливаем цену выхода как уровень TP
-                    self.position['exit_price_override'] = self.position['entry'] + tp_dist
-                    return True
-
-            if self.position['type'] == 'SHORT':
-                if row['low'] <= self.position['entry'] - tp_dist:
-                    # Устанавливаем цену выхода как уровень TP
-                    self.position['exit_price_override'] = self.position['entry'] - tp_dist
-                    return True
-
-        return False
 
     def _close_position(self, row: pd.Series, idx: int):
         """
@@ -380,5 +181,210 @@ class Backtester(BaseFileHandler):
         self.total_sl_hits = 0
         self.equity_history = []
 
+    def _prepare_vectorized_rules(self, features_columns: pd.Index):
+        """
+        Превращает текстовые правила в бинарную матрицу NumPy для мгновенных расчетов.
+        """
+        if self.rules.empty:
+            self.rule_matrix = np.array([])
+            return
 
+        # Создаем пустую матрицу: [кол-во правил x кол-во признаков]
+        num_rules = len(self.rules)
+        num_features = len(features_columns)
+        self.rule_matrix = np.zeros((num_rules, num_features), dtype=np.int8)
+
+        # Составляем карту соответствия: имя фичи -> индекс столбца
+        feature_to_idx = {name: i for i, name in enumerate(features_columns)}
+
+        for i, (idx, rule) in enumerate(self.rules.iterrows()):
+            rule_name = rule['rule_name']
+            # Используем вашу логику очистки имен
+            clean_name = rule_name.replace('_prev_', '|').replace('_curr_', '|')
+            needed_features = [p.strip('_') for p in clean_name.split('|') if p]
+
+            for feat in needed_features:
+                if feat in feature_to_idx:
+                    self.rule_matrix[i, feature_to_idx[feat]] = 1
+
+        # Считаем, сколько признаков должно совпасть для каждого правила
+        self.rule_requirements = self.rule_matrix.sum(axis=1)
+
+    def get_active_rules_fast(self, features_row_values: np.ndarray) -> pd.DataFrame:
+        """
+        Векторизованная проверка правил через NumPy.
+        features_row_values: одномерный массив (0 и 1) текущего бара.
+        """
+        if self.rule_matrix.size == 0:
+            return pd.DataFrame()
+
+        # Магическая строка: перемножаем матрицу правил на вектор текущих фич
+        # Результат: сколько признаков каждого правила сработало на этом баре
+        matched_counts = np.dot(self.rule_matrix, features_row_values)
+
+        # Сравниваем: если кол-во сработавших == кол-во требуемых, правило активно
+        active_indices = np.where(matched_counts == self.rule_requirements)[0]
+
+        if len(active_indices) == 0:
+            return pd.DataFrame()
+
+        return self.rules.iloc[active_indices]
+
+    def run_backtest(self, df: pd.DataFrame, features: pd.DataFrame, symbol: str,
+                     timeframe: str, exit_mode: str = "SIGNAL_TO_SIGNAL", use_sl=None,
+                     rules_data: Dict = None) -> Dict:
+        # 1. Синхронизация данных
+        common_index = df.index.intersection(features.index)
+        df = df.loc[common_index].copy()
+        features = features.loc[common_index].copy()
+
+        self.exit_mode, self.symbol, self.timeframe, self.current_sl_mode = exit_mode, symbol, timeframe, use_sl
+        self.reset()
+
+        data = rules_data if rules_data is not None else self.load_rules(symbol, timeframe)
+        if data is None:
+            return {'error': 'Нет правил (ни в памяти, ни в кэше)'}
+        # Если загрузился словарь
+        if isinstance(data, dict):
+            # Поддерживаем оба ключа 'all_rules' (из памяти) и 'top_rules' (из кэша)
+            self.rules = data.get('all_rules') if 'all_rules' in data else data.get('top_rules')
+            self.current_min_conf = data.get('min_confidence', "N/A")
+        else:
+            self.rules = data
+            self.current_min_conf = "N/A"
+
+        rules_count = len(self.rules) if not self.rules.empty else 0
+        if self.rules.empty: return {'error': 'Нет правил'}
+
+        # 2. Подготовка векторизации
+        self._prepare_vectorized_rules(features.columns)
+
+        # Переводим всё в NumPy массивы (обращение к ним в сотни раз быстрее iloc)
+        feat_values = features.values.astype(np.int8)
+        atr_values = self.calculate_atr(df).values
+        close_prices = df['close'].values
+        open_prices = df['open'].values
+        high_prices = df['high'].values
+        low_prices = df['low'].values
+        time_values = df['time'].values if 'time' in df.columns else df.index.values
+
+        # МГНОВЕННЫЙ ПРЕДРАССЧЕТ СИГНАЛОВ (Матричное умножение)
+        match_matrix = np.dot(feat_values, self.rule_matrix.T)
+        signals_mask = (match_matrix == self.rule_requirements)
+
+        # 3. ОСНОВНОЙ ЦИКЛ (Чистый NumPy)
+        for i in range(200, len(df)):
+            # Получаем правила через маску (быстрее, чем get_active_rules)
+            active_idx = np.where(signals_mask[i])[0]
+            active_rules = self.rules.iloc[active_idx] if active_idx.size > 0 else pd.DataFrame()
+
+            # ВЫЗОВ ОПТИМИЗИРОВАННОГО ОБРАБОТЧИКА
+            self._process_bar_optimized(
+                close_prices[i], open_prices[i], high_prices[i], low_prices[i],
+                time_values[i], active_rules, atr_values[i], i
+            )
+
+        # 4. ФИНАЛИЗАЦИЯ
+        if self.position:
+            # Для закрытия последнего бара создаем минимальный Series
+            last_row = pd.Series({'close': close_prices[-1]}, name=time_values[-1])
+            self._close_position(last_row, len(df) - 1)
+
+        start_date = pd.to_datetime(time_values[0]).strftime('%d-%m-%Y')
+        end_date = pd.to_datetime(time_values[-1]).strftime('%d-%m-%Y')
+        period = f"[{start_date} → {end_date}]"
+
+        calculator = MetricsCalculator(verbose=self.verbose)
+        metrics = calculator.calculate(
+            self.trades, INITIAL_CAPITAL, rules_count,
+            sl_hits=self.total_sl_hits,
+            equity_history=self.equity_history,
+            use_sl=self.current_sl_mode
+        )
+        calculator.print_metrics(metrics, symbol, timeframe, exit_mode, period,  min_conf=self.current_min_conf)
+        return metrics
+
+    def _process_bar_optimized(self, close: float, open_p: float, high: float, low: float,
+                               timestamp, active_rules: pd.DataFrame, atr: float, idx: int):
+        # Вход
+        if not self.position:
+            if not active_rules.empty:
+                self._check_entry_optimized(close, timestamp, active_rules, atr, idx)
+        # Управление позицией
+        else:
+            # 1. Сначала проверяем выход (Stop Loss, TP, Сигналы)
+            if self._check_exit_optimized(close, open_p, high, low, active_rules, atr, idx):
+                fake_row = pd.Series({'close': close}, name=timestamp)
+                self._close_position(fake_row, idx)
+            else:
+                # 2. Если не вышли — проверяем пирамидинг
+                if not active_rules.empty:
+                    self._check_pyramid(active_rules, close)
+
+        # 3. Расчет эквити (Floating DD) на чистых числах
+        unrealized = self.pos_manager.calculate_unrealized_pnl(self.position, close)
+        self.equity_history.append(self.capital + unrealized)
+
+    def _check_entry_optimized(self, close: float, timestamp, active_rules: pd.DataFrame, atr: float, idx: int):
+        if 'direction' not in active_rules.columns: return
+
+        buy_rules = active_rules[active_rules['direction'] == 'UP']
+        sell_rules = active_rules[active_rules['direction'] == 'DOWN']
+
+        sl_mult = self._get_sl_multiplier()
+        risk_amount = self.capital * RISK_PER_TRADE
+
+        # Защита от деления на 0 при отключенном стопе
+        effective_sl_mult = sl_mult if sl_mult > 0 else 1.0
+        size = risk_amount / (atr * SL_ATR_MULTIPLIER * effective_sl_mult)
+
+        if not buy_rules.empty:
+            rule = buy_rules.loc[buy_rules['lift'].idxmax()]
+            self.position = self.pos_manager.create_long(
+                close, atr, size, pd.Timestamp(timestamp), idx, rule['rule_name'], sl_mult)
+        elif not sell_rules.empty:
+            rule = sell_rules.loc[sell_rules['lift'].idxmax()]
+            self.position = self.pos_manager.create_short(
+                close, atr, size, pd.Timestamp(timestamp), idx, rule['rule_name'], sl_mult)
+
+    def _check_exit_optimized(self, close: float, open_p: float, high: float, low: float,
+                              active_rules: pd.DataFrame, atr: float, idx: int) -> bool:
+        # Проверка Stop Loss
+        if self.position['sl'] is not None:
+            if self.position['type'] == 'LONG':
+                if open_p <= self.position['sl']:
+                    self.position['exit_price_override'] = open_p
+                    return True
+                if low <= self.position['sl']:
+                    self.position['exit_price_override'] = self.position['sl']
+                    return True
+            else:  # SHORT
+                if open_p >= self.position['sl']:
+                    self.position['exit_price_override'] = open_p
+                    return True
+                if high >= self.position['sl']:
+                    self.position['exit_price_override'] = self.position['sl']
+                    return True
+
+        # Сигналы выхода (SIGNAL_TO_SIGNAL)
+        if self.exit_mode == "SIGNAL_TO_SIGNAL" and not active_rules.empty:
+            opp_dir = 'DOWN' if self.position['type'] == 'LONG' else 'UP'
+            if not active_rules[active_rules['direction'] == opp_dir].empty:
+                return True
+
+        # ONE_CANDLE
+        if self.exit_mode == "ONE_CANDLE":
+            return idx >= self.position['entry_idx'] + 1
+
+        # ATR_TP
+        if self.exit_mode == "ATR_TP":
+            tp_dist = atr * TP_ATR_MULTIPLIER
+            if self.position['type'] == 'LONG' and high >= self.position['entry'] + tp_dist:
+                self.position['exit_price_override'] = self.position['entry'] + tp_dist
+                return True
+            if self.position['type'] == 'SHORT' and low <= self.position['entry'] - tp_dist:
+                self.position['exit_price_override'] = self.position['entry'] - tp_dist
+                return True
+
+        return False
 
