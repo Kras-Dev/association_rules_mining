@@ -178,6 +178,7 @@ class BacktestRunner(BaseFileHandler):
                 # Добавляем два варианта для каждой пары символ-таймфрейм
                 tasks.append((s, t, "SIGNAL_TO_SIGNAL", True))  # Тест с SL
                 tasks.append((s, t, "SIGNAL_TO_SIGNAL", False))  # Тест БЕЗ SL
+                tasks.append((s, t, "ONE_CANDLE", False))
 
         print(f"{self._get_context()}: {len(tasks)} тестов (пары SL/NoSL) × {self.max_workers} ядер")
         print("=" * 80)

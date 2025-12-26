@@ -75,11 +75,26 @@ def get_candles(tf: str) -> int:
     # Если таймфрейм не найден, возвращаем большое значение по умолчанию
     return CANDLES_BY_TF.get(tf, 35000)
 
-# Конфигурация параметров ARM для разных ТФ
+# # Конфигурация параметров ARM для разных ТФ
+# ARM_CONFIG = {
+#     # Минутки: высокая зашумленность, берем только "бетонные" паттерны (много данных)
+#     'M15': {'min_support': 100, 'min_confidence': 0.65},
+#     'M30': {'min_support': 80, 'min_confidence': 0.65},
+#
+#     # Часовики: средний шум, снижаем точность ради количества сделок
+#     'H1': {'min_support': 40, 'min_confidence': 0.60},
+#     'H4': {'min_support': 25, 'min_confidence': 0.60},
+#
+#     # Дневки: мало данных, важна каждая крупица, снижаем поддержку
+#     'D1': {'min_support': 7, 'min_confidence': 0.63},
+# }
+
 ARM_CONFIG = {
-    'M15': {'min_support': 50, 'min_confidence': 0.71},
-    'M30': {'min_support': 45, 'min_confidence': 0.71},
-    'H1':  {'min_support': 33, 'min_confidence': 0.74},
-    'H4':  {'min_support': 26, 'min_confidence': 0.75},
-    'D1':  {'min_support': 20, 'min_confidence': 0.76},
+    'M15': {'min_support': 38, 'min_confidence': 0.71},  # Жестко!
+    'M30': {'min_support': 38, 'min_confidence': 0.71},  # Жестко!
+
+    'H1': {'min_support': 30, 'min_confidence': 0.61},  # Баланс
+    'H4': {'min_support': 24, 'min_confidence': 0.61},  # Баланс
+
+    'D1': {'min_support': 20, 'min_confidence': 0.60},  # SBER +42%!
 }

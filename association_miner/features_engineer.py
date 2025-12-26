@@ -146,7 +146,7 @@ class Features(BaseLogger):
         base_patterns = [col for col in binary_cols if
                          not col.startswith('vol_') and
                          col not in ['next_up', 'next_down'] and
-                         20 < sums[col] < (total_rows * 0.85)]
+                         20 < sums[col] < (total_rows * 0.88)]
 
         vol_patterns = [col for col in binary_cols if col.startswith('vol_') and sums[col] > 15]
 
@@ -170,6 +170,20 @@ class Features(BaseLogger):
                 new_cols_dict[f'{candle}_prev_{vol}'] = features[candle] * vol_shifted
                 # Предыдущая свеча + текущий volume
                 new_cols_dict[f'{vol}_curr_{candle}'] = vol_shifted * features[candle]
+
+        # 4. ATR ТРЕНД СЕКУЕНСЫ (ДИНАМИЧЕСКИ!)
+        atr = self.calculate_atr(df)
+        atr_up = (atr > atr.shift(1)).astype(float)  # ATR растет = волатильность ↑
+        atr_down = (atr < atr.shift(1)).astype(float)  # ATR падает = волатильность ↓
+
+        for candle in base_patterns:
+            # Текущая свеча + ATR тренд
+            new_cols_dict[f'{candle}_atr_up'] = features[candle] * atr_up
+            new_cols_dict[f'{candle}_atr_down'] = features[candle] * atr_down
+
+            # Предыдущий ATR тренд + текущая свеча
+            new_cols_dict[f'atr_up_prev_{candle}'] = atr_up.shift(1).fillna(0) * features[candle]
+            new_cols_dict[f'atr_down_prev_{candle}'] = atr_down.shift(1).fillna(0) * features[candle]
 
         # Создаем DataFrame из словаря
         seq_df = pd.DataFrame(new_cols_dict, index=features.index)
@@ -290,7 +304,6 @@ class Features(BaseLogger):
         features['adx_no_trend'] = (adx < 20).astype(float)
         features['adx_strong_trend'] = (adx > 25).astype(float)
 
-
         self._log_debug(f"Trend & ma: {len(features)}")
         return features
 
@@ -306,24 +319,15 @@ class Features(BaseLogger):
         self._log_debug(f"VSA: {len(features)}")
         return features
 
-
-    # def create_target(self, df: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
-    #     # Таргеты на 1 шаг вперед. Look-ahead bias отсутствует, если последняя строка удаляется позже.
-    #     features['next_up'] = (df['close'].shift(-1) > df['close']).astype(float)
-    #     features['next_down'] = (df['close'].shift(-1) < df['close']).astype(float)
-    #
-    #     self._log_debug(f"FINALS с target:{len(features)}")
-    #     return features
     def create_target(self, df: pd.DataFrame, features: pd.DataFrame) -> pd.DataFrame:
-        atr = self.calculate_atr(df)  # Используем ваш метод ATR
-
-        # Сдвиг на -1 (следующая свеча)
+        atr = self.calculate_atr(df)
         diff = df['close'].shift(-1) - df['close']
 
-        # Цель: движение вверх больше, чем 0.2 * ATR (фильтр шума)
-        features['next_up'] = (diff > (atr * 0.2)).astype(float)
-        features['next_down'] = (diff < -(atr * 0.2)).astype(float)
+        # 🔥 0.25 * ATR = ЗОЛОТАЯ СЕРЕДИНА!
+        features['next_up'] = (diff > (atr * 0.25)).astype(float)
+        features['next_down'] = (diff < -(atr * 0.25)).astype(float)
 
+        self._log_debug(f"ATR target: {features['next_up'].sum()} up, {features['next_down'].sum()} down")
         return features
 
     def create_all_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -354,14 +358,16 @@ class Features(BaseLogger):
         self._log_info("6/6 Target + cleanup...")
         final = self.create_target(df, sequences)
 
-        # ФИНАЛЬНАЯ БИНАРИЗАЦИЯ И СЖАТИЕ (Защита 2025)
-        final = final.select_dtypes(include=['number', 'bool']).replace([np.inf, -np.inf], np.nan).fillna(0)
-        final_uint8 = (final > 0.5).astype(np.uint8)
+        # Отрезаем прогрев СНАЧАЛА
+        result = final.iloc[self.warmup_period:]
+        # Удалит и строки с пустым ADX, и строки с пустым таргетом
+        result = result.dropna()
+        # ФИНАЛЬНАЯ БИНАРИЗАЦИЯ.
+        # Применяем только к колонкам, которые еще не бинарные
+        final_uint8 = (result > 0.5).astype(np.uint8)
 
-        # Отрезаем прогрев. Теперь в result строк меньше, чем в исходном df на 200 штук.
-        result = final_uint8.iloc[self.warmup_period:]
-        self._log_info(f"✅ Готово: {result.shape[1]} фич")
-        return result
+        self._log_info(f"✅ Готово: {final_uint8.shape[1]} фич")
+        return final_uint8
 
     def test_features(self, df: pd.DataFrame):
         features = self.create_all_features(df)

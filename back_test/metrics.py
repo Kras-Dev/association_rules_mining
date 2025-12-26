@@ -170,7 +170,7 @@ class MetricsCalculator(BaseLogger):
         print(
             f"🛡️ Recovery Factor:  {metrics['recovery_factor']} — Способность системы восстанавливаться после просадок (лучше > 1.0)")
         print(
-            f"💵 Avg Win/Loss:    ${metrics['avg_win']} / ${metrics['avg_loss']} — Средний профит и средний лосс на сделку, {abs(metrics['avg_win']/metrics['avg_loss']):.2f}")
+            f"💵 Avg Win/Loss:    ${metrics['avg_win']} / ${metrics['avg_loss']} — Средний профит и средний лосс на сделку")
 
         # Статистика стопов
         print(f"🛑 SL Hits:         {metrics['sl_hits']} — Количество закрытий по Stop Loss")
