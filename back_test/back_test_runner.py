@@ -5,6 +5,7 @@ import time
 from tqdm.contrib.concurrent import process_map
 from association_miner.candle_miner import CandleMiner
 from association_miner.features_engineer import Features
+from association_miner.features_trend import FeaturesTrend
 from mt5_connector.client import MT5Client
 import MetaTrader5 as mt5
 from back_test.backtester import Backtester
@@ -102,7 +103,7 @@ class BacktestRunner(BaseFileHandler):
                 if df_full is None or len(df_full) < 1000:
                     return symbol, tf, mode, {'error': 'Мало данных'}
                 # ШАГ 1: Генерация фич (MA, индикаторы) на всей истории для корректности
-                feat_gen = Features(verbose=False)
+                feat_gen = FeaturesTrend(verbose=False)
                 df_with_all_features = feat_gen.create_all_features(df_full)
 
                 time_data = time.time() - start_data
@@ -178,7 +179,6 @@ class BacktestRunner(BaseFileHandler):
                 # Добавляем два варианта для каждой пары символ-таймфрейм
                 tasks.append((s, t, "SIGNAL_TO_SIGNAL", True))  # Тест с SL
                 tasks.append((s, t, "SIGNAL_TO_SIGNAL", False))  # Тест БЕЗ SL
-                tasks.append((s, t, "ONE_CANDLE", False))
 
         print(f"{self._get_context()}: {len(tasks)} тестов (пары SL/NoSL) × {self.max_workers} ядер")
         print("=" * 80)

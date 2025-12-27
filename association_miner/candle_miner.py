@@ -1,5 +1,6 @@
 from pathlib import Path
 from association_miner.features_engineer import Features
+from association_miner.features_trend import FeaturesTrend
 from tqdm import tqdm
 import pandas as pd
 from typing import Dict, Optional, Tuple, Any
@@ -161,7 +162,7 @@ class CandleMiner(BaseFileHandler):
         # 2. Если кэша нет - запускаем Feature Engineering
         self._log_info(f"🔍 ПОЛНЫЙ АНАЛИЗ {symbol} {timeframe} (Старт майнинга)")
 
-        feat_gen = Features(verbose=self.verbose)
+        feat_gen = FeaturesTrend(verbose=self.verbose)
         all_features = feat_gen.create_all_features(df)
 
         if all_features.empty:
